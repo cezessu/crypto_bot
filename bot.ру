@@ -147,6 +147,12 @@ WELCOME_TEXT = (
 )
 SUBSCRIBE_TEXT = "Подпишись на канал и получи методичку 👇"
 
+# ДОБАВЛЯЕМ НОВОЕ СООБЩЕНИЕ ДЛЯ ПОСЛЕ ВЫДАЧИ МЕТОДИЧКИ
+AFTER_PDF_TEXT = (
+    "Если ты хочешь продолжить обучаться и получить следующие методички, "
+    "сопровождаемые видео-объяснениями >> читай канал и пиши по всем вопросам админу"
+)
+
 def is_subscribed(user_id):
     try:
         member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
@@ -197,6 +203,10 @@ def handle_check_sub(call):
         try:
             with open(PDF_FILENAME, 'rb') as f:
                 bot.send_document(user_id, f, caption="🎉 Ваша методичка по крипто трейдингу! Спасибо за подписку.")
+            
+            # ============= ДОБАВЛЯЕМ СООБЩЕНИЕ ПОСЛЕ ВЫДАЧИ PDF =============
+            bot.send_message(user_id, AFTER_PDF_TEXT)
+            
             # Удаляем старое сообщение с кнопками, чтобы не засорять
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except FileNotFoundError:
