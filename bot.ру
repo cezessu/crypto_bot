@@ -16,8 +16,8 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
-CHANNEL_USERNAME = "tvoi_kanal"          # без @
-PDF_FILENAME = "metodichka.pdf"          # файл должен лежать в папке проекта
+CHANNEL_USERNAME = "tradegrowthh"          # без @
+PDF_FILENAME = "Фундаментальныеосновы.pdf"          # файл должен лежать в папке проекта
 
 # Хранилище капчи: user_id -> {"answer": str, "attempts": int, "blocked_until": float or 0}
 captcha_data = {}
