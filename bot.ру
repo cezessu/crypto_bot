@@ -1,4 +1,118 @@
-send_message(user_id, "❌ 5 неверных попыток. Доступ заблокирован на 5 минут.")
+import os
+import io
+import time
+import random
+import string
+import telebot
+from telebot import types
+from flask import Flask, request
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+TOKEN = os.environ.get('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения")
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+# --- НАСТРОЙКИ ---
+CHANNEL_USERNAME = "tvoi_kanal"          # без @
+PDF_FILENAME = "metodichka.pdf"          # файл должен лежать в папке проекта
+
+# Хранилище капчи: user_id -> {"answer": str, "attempts": int, "blocked_until": float or 0}
+captcha_data = {}
+
+# --- ГЕНЕРАТОР КАПЧИ С БУКВАМИ И ИСКАЖЕНИЯМИ ---
+def generate_captcha_text(length=5):
+    """Случайная строка из заглавных букв и цифр (без похожих)."""
+    chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # исключены I, O, 0, 1
+    return ''.join(random.choices(chars, k=length))
+
+def draw_captcha(text):
+    """Создаёт искажённое изображение с текстом. Возвращает bytes."""
+    W, H = 250, 90
+    img = Image.new('RGB', (W, H), color=(240, 240, 240))
+    draw = ImageDraw.Draw(img)
+
+    # Фон с шумом
+    for _ in range(random.randint(200, 400)):
+        x = random.randint(0, W-1)
+        y = random.randint(0, H-1)
+        draw.point((x, y), fill=(random.randint(0, 180), random.randint(0, 180), random.randint(0, 180)))
+
+    # Линии через всё изображение
+    for _ in range(random.randint(3, 6)):
+        x1 = random.randint(0, W)
+        y1 = random.randint(0, H)
+        x2 = random.randint(0, W)
+        y2 = random.randint(0, H)
+        draw.line([(x1, y1), (x2, y2)], fill=(random.randint(0, 120), random.randint(0, 120), random.randint(0, 120)), width=2)
+
+    # Шрифт
+    try:
+        font = ImageFont.truetype("arial.ttf", 36)
+    except:
+        font = ImageFont.load_default()
+
+    # Рисуем буквы по одной с поворотом и смещением
+    x_offset = 15
+    for ch in text:
+        # Создаём временное изображение для поворота
+        txt_img = Image.new('RGBA', (50, 60), (0, 0, 0, 0))
+        txt_draw = ImageDraw.Draw(txt_img)
+        txt_draw.text((5, 5), ch, font=font, fill=(random.randint(0, 80), random.randint(0, 80), random.randint(0, 80)))
+        # Поворот
+        angle = random.randint(-25, 25)
+        rotated = txt_img.rotate(angle, expand=1, resample=Image.BICUBIC)
+        # Вставляем на основное изображение
+        img.paste(rotated, (x_offset, random.randint(10, 25)), rotated)
+        x_offset += 35 + random.randint(5, 15)
+
+    # Размытие для дополнительного искажения
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
+
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf.getvalue()
+
+def send_captcha(chat_id, attempts):
+    """Отправляет новую капчу и обновляет данные."""
+    text = generate_captcha_text()
+    img_bytes = draw_captcha(text)
+    captcha_data[chat_id] = {
+        "answer": text,
+        "attempts": attempts,
+        "blocked_until": 0
+    }
+    bot.send_photo(chat_id, img_bytes, caption="Введите символы с картинки (заглавные буквы/цифры):")
+
+def check_captcha(user_id, user_text):
+    """Проверяет ответ и управляет блокировкой. Возвращает True, если капча пройдена."""
+    if user_id not in captcha_data:
+        return False
+    data = captcha_data[user_id]
+    # Проверка блокировки по времени
+    if data["blocked_until"] > 0:
+        if time.time() < data["blocked_until"]:
+            remaining = int(data["blocked_until"] - time.time())
+            bot.send_message(user_id, f"⏳ Вы исчерпали попытки. Попробуйте через {remaining} сек.")
+            return False
+        else:
+            # Блокировка истекла, сбрасываем счётчик и удаляем текущую капчу (отправится новая)
+            del captcha_data[user_id]
+            return False
+
+    # Сравнение без учёта регистра и пробелов
+    if user_text.strip().upper() == data["answer"].upper():
+        del captcha_data[user_id]
+        return True
+    else:
+        data["attempts"] += 1
+        if data["attempts"] >= 5:
+            # Блокируем на 5 минут
+            data["blocked_until"] = time.time() + 300
+            bot.send_message(user_id, "❌ 5 неверных попыток. Доступ заблокирован на 5 минут.")
             return False
         else:
             remaining = 5 - data["attempts"]
@@ -94,7 +208,7 @@ def handle_check_sub(call):
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
 
 # --- ЗАПУСК ---
-if name == '__main__':
+if __name__ == '__main__':
     if os.environ.get('RENDER_EXTERNAL_HOSTNAME') is None:
         print("Локальный запуск (long polling)")
         bot.infinity_polling()
