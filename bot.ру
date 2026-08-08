@@ -609,7 +609,10 @@ def process_lesson_request(message, lesson_number, check_func):
 def process_uid(message, lesson_number, check_func):
     user_id = message.chat.id
     uid = message.text.strip()
-
+    
+    # ПРОВЕРКА: пишем в логи, что функция вызвана
+    print(f"🔔 process_uid вызвана! UID: {uid}, lesson: {lesson_number}")
+    
     if not uid.isdigit():
         bot.send_message(user_id, "❌ Введите только цифры! Попробуйте снова через /get_lesson" + str(lesson_number))
         return
@@ -654,7 +657,6 @@ if __name__ == '__main__':
         print("Локальный запуск (long polling)")
         bot.infinity_polling()
     else:
-        # Принудительная установка вебхука при старте
         render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
         webhook_url = f'https://{render_host}/{TOKEN}'
         try:
