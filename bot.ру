@@ -58,12 +58,19 @@ class MexcChecker:
         
         headers = {'X-MEXC-APIKEY': self.api_key}
         
-        response = requests.get(
-            f"{self.base_url}{endpoint}",
-            headers=headers,
-            params=params,
-            timeout=10
-        )
+        url = f"{self.base_url}{endpoint}"
+        
+        # Логируем запрос (это будет видно в логах Render)
+        print(f"🔍 ЗАПРОС: {url}")
+        print(f"📦 ПАРАМЕТРЫ: {params}")
+        print(f"🔑 HEADERS: {headers}")
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        # Логируем ответ
+        print(f"📥 ОТВЕТ API: {response.status_code}")
+        print(f"📄 ТЕКСТ: {response.text[:500]}")
+        
         return response
 
     def check_lesson2(self, uid):
@@ -235,6 +242,7 @@ class MexcChecker:
 # --- ИНИЦИАЛИЗАЦИЯ ПРОВЕРЯЛЬЩИКА ---
 if MEXC_API_KEY and MEXC_API_SECRET:
     mexc = MexcChecker(MEXC_API_KEY, MEXC_API_SECRET)
+    print("✅ MexcChecker инициализирован успешно")
 else:
     mexc = None
     print("⚠️ ВНИМАНИЕ: MEXC_API_KEY или MEXC_API_SECRET не заданы! Проверка рефералов НЕ РАБОТАЕТ.")
