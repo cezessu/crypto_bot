@@ -54,24 +54,35 @@ class MexcChecker:
     def _request(self, endpoint, params):
         timestamp = int(time.time() * 1000)
         params['timestamp'] = timestamp
-        params['signature'] = self._sign(params)
+        
+        # Копируем параметры для подписи (БЕЗ signature)
+        sign_params = params.copy()
+        query_string = '&'.join([f"{k}={v}" for k, v in sorted(sign_params.items())])
+        
+        # Считаем подпись
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Добавляем подпись в запрос
+        params['signature'] = signature
         
         headers = {'X-MEXC-APIKEY': self.api_key}
-        
         url = f"{self.base_url}{endpoint}"
         
-        # --- МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ ---
+        # --- ЛОГИРОВАНИЕ ---
         print(f"\n🔍 ЗАПРОС К API:")
         print(f"📌 URL: {url}")
         print(f"📦 ПАРАМЕТРЫ: {params}")
         print(f"🔑 API KEY: {self.api_key[:10]}...{self.api_key[-4:]}")
-        print(f"📋 ПОЛНЫЙ URL: {url}?{'&'.join([f'{k}={v}' for k, v in sorted(params.items())])}")
+        print(f"📋 ПОЛНЫЙ URL: {url}?{query_string}&signature={signature}")
         
         response = requests.get(url, headers=headers, params=params, timeout=10)
         
         print(f"📥 ОТВЕТ API: {response.status_code}")
         print(f"📄 ТЕКСТ: {response.text[:500]}")
-        print(f"📋 ПОЛНЫЙ ТЕКСТ: {response.text}")
         
         return response
 
