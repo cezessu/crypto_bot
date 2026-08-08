@@ -2,46 +2,260 @@ import os
 import io
 import time
 import random
-import string
+import hashlib
+import hmac
+import requests
 import telebot
 from telebot import types
 from flask import Flask, request
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения")
+
+MEXC_API_KEY = os.environ.get('MEXC_API_KEY')
+MEXC_API_SECRET = os.environ.get('MEXC_API_SECRET')
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
-CHANNEL_USERNAME = "tradegrowthh"          # без @
-PDF_FILENAME = "Фундаментальныеосновы.pdf"          # файл должен лежать в папке проекта
+CHANNEL_USERNAME = "tradegrowthh"
 
-# Хранилище капчи: user_id -> {"answer": str, "attempts": int, "blocked_until": float or 0}
+# --- ФАЙЛЫ МЕТОДИЧЕК ---
+LESSON_FILES = {
+    1: {"main": "Фундаментальныеосновы.pdf", "bonus": None},
+    2: {"main": "2_урок.pdf", "bonus": "Дополнительно к 2 уроку.pdf"},
+    3: {"main": "3_урок.pdf", "bonus": "Дополнительно к 3 уроку.pdf"},
+    4: {"main": "4_урок.pdf", "bonus": None},
+    5: {"main": "5_урок.pdf", "bonus": "Дополнительно к 5 уроку.pdf"},
+    6: {"main": "6_урок.pdf", "bonus": None},
+    7: {"main": "7_урок.pdf", "bonus": "Дополнительно к 7 уроку.pdf"},
+}
+
+# --- КЛАСС ДЛЯ РАБОТЫ С MEXC API ---
+class MexcChecker:
+    def __init__(self, api_key, api_secret):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_url = "https://api.mexc.com"
+
+    def _sign(self, params):
+        query = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            query.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        return signature
+
+    def _request(self, endpoint, params):
+        timestamp = int(time.time() * 1000)
+        params['timestamp'] = timestamp
+        params['signature'] = self._sign(params)
+        
+        headers = {'X-MEXC-APIKEY': self.api_key}
+        
+        response = requests.get(
+            f"{self.base_url}{endpoint}",
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+        return response
+
+    def check_lesson2(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            deposit = ref.get('firstDeposit', 0)
+            trade_time = ref.get('tradeTime')
+            
+            if deposit is None or deposit < 100:
+                return False, f"❌ Пополните счёт от 100 USDT. Сейчас: {deposit or 0} USDT"
+            if trade_time is None:
+                return False, "❌ Вы пополнили счёт, но ещё не совершили ни одной сделки."
+            
+            return True, f"✅ Всё готово! Депозит: {deposit} USDT, сделка совершена."
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+    def check_lesson3(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            volume = ref.get('tradeVolume', 0)
+            
+            if volume < 300:
+                return False, f"❌ Ваш объём: {volume} USDT. Нужно минимум 300 USDT."
+            
+            return True, f"✅ Отлично! Ваш объём: {volume} USDT."
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+    def check_lesson4(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            invited_count = ref.get('invitedCount', 0)
+            
+            if invited_count < 1:
+                return False, "❌ У вас нет активных рефералов. Приведите друга!"
+            
+            return True, f"✅ У вас {invited_count} активных рефералов!"
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+    def check_lesson5(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            trade_count = ref.get('tradeCount', 0)
+            
+            if trade_count < 20:
+                return False, f"❌ У вас {trade_count} сделок. Нужно минимум 20."
+            
+            return True, f"✅ У вас {trade_count} сделок!"
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+    def check_lesson6(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            invited_count = ref.get('invitedCount', 0)
+            
+            if invited_count < 2:
+                return False, f"❌ У вас {invited_count} рефералов. Нужно минимум 2."
+            
+            return True, f"✅ У вас {invited_count} рефералов!"
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+    def check_lesson7(self, uid):
+        params = {
+            'uid': uid,
+            'startTime': 1609459200000,
+            'endTime': int(time.time() * 1000)
+        }
+        try:
+            resp = self._request('/api/v3/affiliate/queryReferralDatas', params)
+            if resp.status_code != 200:
+                return False, "Ошибка API MEXC"
+            
+            data = resp.json()
+            referrals = data.get('data', {}).get('resultList', [])
+            
+            if not referrals:
+                return False, "❌ Вы не зарегистрированы по реферальной ссылке."
+            
+            ref = referrals[0]
+            volume = ref.get('tradeVolume', 0)
+            invited_count = ref.get('invitedCount', 0)
+            
+            if volume >= 5000 or invited_count >= 3:
+                return True, f"✅ Условие выполнено! Объём: {volume} USDT, Рефералов: {invited_count}"
+            
+            return False, f"❌ Объём: {volume} USDT (нужно 5000) ИЛИ рефералов: {invited_count} (нужно 3)"
+        except Exception as e:
+            return False, f"Техническая ошибка: {str(e)}"
+
+# --- ИНИЦИАЛИЗАЦИЯ ПРОВЕРЯЛЬЩИКА ---
+if MEXC_API_KEY and MEXC_API_SECRET:
+    mexc = MexcChecker(MEXC_API_KEY, MEXC_API_SECRET)
+else:
+    mexc = None
+    print("⚠️ ВНИМАНИЕ: MEXC_API_KEY или MEXC_API_SECRET не заданы! Проверка рефералов НЕ РАБОТАЕТ.")
+
+# --- КАПЧА ---
 captcha_data = {}
 
-# --- ГЕНЕРАТОР КАПЧИ С БУКВАМИ И ИСКАЖЕНИЯМИ ---
 def generate_captcha_text(length=5):
-    """Случайная строка из заглавных букв и цифр (без похожих)."""
-    chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # исключены I, O, 0, 1
+    chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     return ''.join(random.choices(chars, k=length))
 
-# ============= ИСПРАВЛЕННАЯ ФУНКЦИЯ КАПЧИ =============
 def draw_captcha(text):
-    """Создаёт изображение с крупными чёткими буквами (без размытия)."""
     W, H = 400, 130
     img = Image.new('RGB', (W, H), color=(245, 245, 245))
     draw = ImageDraw.Draw(img)
 
-    # Лёгкий шум (редкие точки)
     for _ in range(random.randint(100, 150)):
         x = random.randint(0, W-1)
         y = random.randint(0, H-1)
         draw.point((x, y), fill=(random.randint(180, 220), random.randint(180, 220), random.randint(180, 220)))
 
-    # 1-2 светлые линии
     for _ in range(random.randint(1, 2)):
         x1 = random.randint(0, W)
         y1 = random.randint(0, H)
@@ -49,14 +263,13 @@ def draw_captcha(text):
         y2 = random.randint(0, H)
         draw.line([(x1, y1), (x2, y2)], fill=(random.randint(200, 230), random.randint(200, 230), random.randint(200, 230)), width=2)
 
-    # Пытаемся загрузить крупный шрифт (на Render обычно есть DejaVu)
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
     except:
         try:
             font = ImageFont.truetype("arial.ttf", 60)
         except:
-            font = ImageFont.load_default()   # fallback (будет мелко, но не упадёт)
+            font = ImageFont.load_default()
 
     x_offset = 25
     for ch in text:
@@ -68,14 +281,12 @@ def draw_captcha(text):
         img.paste(rotated, (x_offset, random.randint(20, 35)), rotated)
         x_offset += 55 + random.randint(5, 10)
 
-    # Размытие полностью убрано
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
     return buf.getvalue()
 
 def send_captcha(chat_id, attempts):
-    """Отправляет новую капчу и обновляет данные."""
     text = generate_captcha_text()
     img_bytes = draw_captcha(text)
     captcha_data[chat_id] = {
@@ -86,36 +297,30 @@ def send_captcha(chat_id, attempts):
     bot.send_photo(chat_id, img_bytes, caption="Введите символы с картинки (заглавные буквы/цифры):")
 
 def check_captcha(user_id, user_text):
-    """Проверяет ответ и управляет блокировкой. Возвращает True, если капча пройдена."""
     if user_id not in captcha_data:
         return False
     data = captcha_data[user_id]
-    # Проверка блокировки по времени
     if data["blocked_until"] > 0:
         if time.time() < data["blocked_until"]:
             remaining = int(data["blocked_until"] - time.time())
             bot.send_message(user_id, f"⏳ Вы исчерпали попытки. Попробуйте через {remaining} сек.")
             return False
         else:
-            # Блокировка истекла, сбрасываем счётчик и удаляем текущую капчу (отправится новая)
             del captcha_data[user_id]
             return False
 
-    # Сравнение без учёта регистра и пробелов
     if user_text.strip().upper() == data["answer"].upper():
         del captcha_data[user_id]
         return True
     else:
         data["attempts"] += 1
         if data["attempts"] >= 5:
-            # Блокируем на 5 минут
             data["blocked_until"] = time.time() + 300
             bot.send_message(user_id, "❌ 5 неверных попыток. Доступ заблокирован на 5 минут.")
             return False
         else:
             remaining = 5 - data["attempts"]
             bot.send_message(user_id, f"❌ Неверно. Осталось попыток: {remaining}")
-            # Отправляем новую капчу сразу
             send_captcha(user_id, data["attempts"])
             return False
 
@@ -140,18 +345,174 @@ def webhook():
 
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = (
-    "Приветствую)\n"
-    "Первым 500 подписчикам дарю методичку по обучению крипто трейдинга! "
-    "Никакой воды, только рабочие инструменты.\n"
-    "Жми кнопку и успевай забрать знания бесплатно 📚 >>"
+    "Приветствую!\n"
+    "Наша команда дает возможность обучиться криптотрейдингу бесплатно. "
+    "Никакой воды, только рабочие инструменты. "
+    "Жми кнопку и успевай забрать знания бесплатно."
 )
 SUBSCRIBE_TEXT = "Подпишись на канал и получи методичку 👇"
 
-# ДОБАВЛЯЕМ НОВОЕ СООБЩЕНИЕ ДЛЯ ПОСЛЕ ВЫДАЧИ МЕТОДИЧКИ
-AFTER_PDF_TEXT = (
-    "Если ты хочешь продолжить обучаться и получить следующие методички, "
-    "сопровождаемые видео-объяснениями >> читай канал и пиши по всем вопросам админу"
-)
+# --- ТЕКСТЫ ПОСЛЕ МЕТОДИЧЕК ---
+def get_after_lesson_text(lesson_number):
+    if lesson_number == 1:
+        return """
+🎉 **Поздравляю! Ты сделал первый шаг!**
+
+Теперь у тебя есть база. Дальше — реальный трейдинг.
+
+🔥 **Следующая методичка:**
+
+📘 **Методичка №2** — Уровни, Фибоначчи, OI, EMA, RSI  
+✅ **Условие:** Пополнить MEXC от **100 USDT** и совершить **первую сделку**
+
+---
+
+👇 **Как получить следующую методичку (№2):**
+
+1. Пополни MEXC от 100 USDT и соверши первую сделку
+2. Напиши боту команду: `/get_lesson2`
+3. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+4. Введи UID — и получишь второй урок!  
+   *(UID можно найти в профиле MEXC — это число из 8–10 цифр)*
+
+Удачи на пути к профи! 🚀
+"""
+    elif lesson_number == 2:
+        return """
+🎉 **Отлично! Ты получил вторую методичку!**
+
+Ты уже научился работать с уровнями и индикаторами. Время двигаться дальше.
+
+🔥 **Следующая методичка:**
+
+📘 **Методичка №3** — Price Action, инсайд-бары, кластерный анализ  
+✅ **Условие:** Общий объём сделок от **300 USDT**
+
+---
+
+👇 **Как получить следующую методичку (№3):**
+
+1. Продолжай торговать, пока общий объём не достигнет 300 USDT  
+   *(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт объём 300 USDT. Всего одна такая сделка — и условие выполнено!)*
+2. Напиши боту команду: `/get_lesson3`
+3. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+4. Введи UID — и получишь третий урок!
+
+Удачи на пути к профи! 🚀
+"""
+    elif lesson_number == 3:
+        return """
+🎉 **Красава! Ты освоил Price Action!**
+
+Теперь ты понимаешь, как читать свечные паттерны и кластеры. Дальше — объёмы.
+
+🔥 **Следующая методичка:**
+
+📘 **Методичка №4** — Горизонтальный объём, Value Area, POC, трейлинг стопа  
+✅ **Условие:** Привести **1 друга**, который зарегистрируется по твоей ссылке, пополнит от 100 USDT и совершит сделку
+
+---
+
+👇 **Как получить следующую методичку (№4):**
+
+1. Приведи друга на MEXC по своей реферальной ссылке  
+   *(Свою ссылку можно взять в разделе «Реферальная программа» на MEXC)*
+2. Дождись, пока он пополнит от 100 USDT и совершит сделку
+3. Напиши боту команду: `/get_lesson4`
+4. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+5. Введи UID — и получишь четвёртый урок!
+
+Удачи на пути к профи! 🚀
+"""
+    elif lesson_number == 4:
+        return """
+🎉 **Ты лидер! Ты привёл первого друга!**
+
+Теперь у тебя есть команда. Время нарабатывать опыт.
+
+🔥 **Следующая методичка:**
+
+📘 **Методичка №5** — Паттерны (вымпел, флаг, клин, М, W, Голова-плечи, Дракон)  
+✅ **Условие:** Совершить **20 сделок** с момента регистрации на MEXC
+
+---
+
+👇 **Как получить следующую методичку (№5):**
+
+1. Продолжай торговать, пока не наберёшь 20 сделок  
+   *(Считаются любые сделки — даже с минимальным объёмом. Главное — количество)*
+2. Напиши боту команду: `/get_lesson5`
+3. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+4. Введи UID — и получишь пятый урок!
+
+Удачи на пути к профи! 🚀
+"""
+    elif lesson_number == 5:
+        return """
+🎉 **Ты уже профи! 20 сделок — это серьёзный опыт!**
+
+Теперь ты готов к пониманию структуры рынка.
+
+🔥 **Следующая методичка:**
+
+📘 **Методичка №6** — Структура рынка, накопление/распределение, 90% Value Area  
+✅ **Условие:** Привести **2 друзей**, которые зарегистрируются по твоей ссылке, пополнят от 100 USDT и совершат сделку
+
+---
+
+👇 **Как получить следующую методичку (№6):**
+
+1. Приведи двух друзей на MEXC по своей реферальной ссылке  
+   *(Свою ссылку можно взять в разделе «Реферальная программа» на MEXC)*
+2. Дождись, пока они пополнят от 100 USDT и совершат сделку
+3. Напиши боту команду: `/get_lesson6`
+4. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+5. Введи UID — и получишь шестой урок!
+
+Удачи на пути к профи! 🚀
+"""
+    elif lesson_number == 6:
+        return """
+🎉 **Огонь! У тебя уже 2 друга в команде!**
+
+Остался последний рывок — самый мощный урок.
+
+🔥 **Следующая (финальная) методичка:**
+
+📘 **Методичка №7** — Фундаментальный анализ 2.0 (токеномика, тренды, оценка проектов)  
+✅ **Условие:** Объём от **5 000 USDT** или привести **3 друзей**
+
+---
+
+👇 **Как получить финальную методичку (№7):**
+
+1. Наторгуй на объём 5 000 USDT **ИЛИ** приведи третьего друга  
+   *(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт 300 USDT. Для 5 000 USDT нужно около 17 таких сделок. Реально за пару недель!)*  
+   *(Свою реферальную ссылку можно взять в разделе «Реферальная программа» на MEXC)*
+2. Напиши боту команду: `/get_lesson7`
+3. **Бот попросит ввести твой UID** (цифры из профиля MEXC)
+4. Введи UID — и получишь финальный урок!
+
+Это финиш! Ты почти у цели! 🚀
+"""
+    elif lesson_number == 7:
+        return """
+🏆 **ПОЗДРАВЛЯЮ! ТЫ ПРОШЁЛ ВЕСЬ КУРС!**
+
+Ты прошёл путь от новичка до полноценного трейдера, который умеет:
+- Анализировать рынок
+- Читать объёмы
+- Видеть паттерны
+- Оценивать проекты
+
+Теперь ты — самостоятельный трейдер. Дальше только практика и твой личный рост!
+
+Если хочешь оставаться в курсе новых материалов — следи за каналом.  
+По всем вопросам пиши админу.
+
+Удачи в больших сделках! 🔥💎
+"""
+    return ""
 
 def is_subscribed(user_id):
     try:
@@ -160,26 +521,51 @@ def is_subscribed(user_id):
     except:
         return False
 
+# --- ОТПРАВКА МЕТОДИЧКИ ---
+def send_lesson(chat_id, lesson_number):
+    files = LESSON_FILES.get(lesson_number)
+    if not files:
+        bot.send_message(chat_id, "❌ Методичка не найдена.")
+        return False
+
+    main_file = files.get("main")
+    bonus_file = files.get("bonus")
+
+    try:
+        with open(main_file, 'rb') as f:
+            bot.send_document(chat_id, f, caption=f"📘 Методичка №{lesson_number}")
+    except FileNotFoundError:
+        bot.send_message(chat_id, f"❌ Файл {main_file} не найден.")
+        return False
+
+    if bonus_file:
+        try:
+            with open(bonus_file, 'rb') as f:
+                bot.send_document(chat_id, f, caption="🎁 **Бонус!** Дополнительный материал к уроку.")
+        except FileNotFoundError:
+            bot.send_message(chat_id, f"⚠️ Бонусный файл не найден.")
+
+    # Отправляем текст после методички
+    after_text = get_after_lesson_text(lesson_number)
+    if after_text:
+        bot.send_message(chat_id, after_text)
+    return True
+
 # --- ОБРАБОТЧИКИ ---
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    # Сбрасываем предыдущее состояние, если было
     captcha_data.pop(message.chat.id, None)
     send_captcha(message.chat.id, 0)
 
-# Обработчик текста только для тех, кто в процессе капчи
 @bot.message_handler(func=lambda msg: msg.from_user.id in captcha_data and not msg.text.startswith('/'))
 def captcha_input(message):
     user_id = message.from_user.id
     if check_captcha(user_id, message.text):
-        # Капча пройдена, показываем основное меню
         markup = types.InlineKeyboardMarkup()
         btn_get = types.InlineKeyboardButton("📥 Забрать методичку", callback_data='request_pdf')
         markup.add(btn_get)
         bot.send_message(user_id, WELCOME_TEXT, reply_markup=markup)
-    # Если капча не пройдена, check_captcha сама отправляет новую капчу или сообщение о блокировке
 
-# Инлайн-кнопка "Забрать методичку"
 @bot.callback_query_handler(func=lambda call: call.data == 'request_pdf')
 def handle_request_pdf(call):
     markup = types.InlineKeyboardMarkup()
@@ -194,26 +580,76 @@ def handle_request_pdf(call):
     )
     bot.answer_callback_query(call.id)
 
-# Проверка подписки и выдача PDF
 @bot.callback_query_handler(func=lambda call: call.data == 'check_sub')
 def handle_check_sub(call):
     user_id = call.from_user.id
     if is_subscribed(user_id):
-        # Пробуем отправить PDF
-        try:
-            with open(PDF_FILENAME, 'rb') as f:
-                bot.send_document(user_id, f, caption="🎉 Ваша методичка по крипто трейдингу! Спасибо за подписку.")
-            
-            # ============= ДОБАВЛЯЕМ СООБЩЕНИЕ ПОСЛЕ ВЫДАЧИ PDF =============
-            bot.send_message(user_id, AFTER_PDF_TEXT)
-            
-            # Удаляем старое сообщение с кнопками, чтобы не засорять
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except FileNotFoundError:
-            bot.send_message(user_id, "Извините, файл методички временно недоступен. Попробуйте позже.")
+        send_lesson(user_id, 1)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id, "Методичка отправлена!")
     else:
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
+
+# --- ОБЩАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ---
+def process_lesson_request(message, lesson_number, check_func):
+    user_id = message.chat.id
+
+    if not mexc:
+        bot.send_message(user_id, "⚠️ Проверка рефералов временно недоступна. Обратитесь к админу.")
+        return
+
+    instruction_text = (
+        "🔍 **Где найти твой UID на MEXC:**\n\n"
+        "1. Открой приложение или сайт MEXC\n"
+        "2. Нажми на иконку профиля в правом верхнем углу\n"
+        "3. Твой UID — это число из 8–10 цифр, написанное под твоим именем\n\n"
+        "📌 **Пример UID:** 12345678\n\n"
+        "👇 **Скопируй свой UID и отправь его в ответ на это сообщение:**"
+    )
+    bot.send_message(user_id, instruction_text)
+    bot.register_next_step_handler(message, process_uid, lesson_number, check_func)
+
+def process_uid(message, lesson_number, check_func):
+    user_id = message.chat.id
+    uid = message.text.strip()
+
+    if not uid.isdigit():
+        bot.send_message(user_id, "❌ Введите только цифры! Попробуйте снова через /get_lesson" + str(lesson_number))
+        return
+
+    bot.send_chat_action(user_id, 'typing')
+    success, msg = check_func(uid)
+
+    if success:
+        bot.send_message(user_id, msg)
+        send_lesson(user_id, lesson_number)
+    else:
+        bot.send_message(user_id, msg)
+
+# --- КОМАНДЫ ДЛЯ МЕТОДИЧЕК №2-№7 ---
+@bot.message_handler(commands=['get_lesson2'])
+def get_lesson2(message):
+    process_lesson_request(message, 2, mexc.check_lesson2)
+
+@bot.message_handler(commands=['get_lesson3'])
+def get_lesson3(message):
+    process_lesson_request(message, 3, mexc.check_lesson3)
+
+@bot.message_handler(commands=['get_lesson4'])
+def get_lesson4(message):
+    process_lesson_request(message, 4, mexc.check_lesson4)
+
+@bot.message_handler(commands=['get_lesson5'])
+def get_lesson5(message):
+    process_lesson_request(message, 5, mexc.check_lesson5)
+
+@bot.message_handler(commands=['get_lesson6'])
+def get_lesson6(message):
+    process_lesson_request(message, 6, mexc.check_lesson6)
+
+@bot.message_handler(commands=['get_lesson7'])
+def get_lesson7(message):
+    process_lesson_request(message, 7, mexc.check_lesson7)
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
