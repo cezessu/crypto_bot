@@ -67,11 +67,7 @@ class MexcChecker:
         return response
 
     def check_lesson2(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -101,11 +97,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson3(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -132,11 +124,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson4(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -163,11 +151,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson5(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -194,11 +178,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson6(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -225,11 +205,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson7(self, uid):
-        params = {
-            'uid': uid,
-            'startTime': 1609459200000,
-            'endTime': int(time.time() * 1000)
-        }
+        params = {'uid': uid}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
