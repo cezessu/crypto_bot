@@ -55,24 +55,20 @@ class MexcChecker:
         timestamp = int(time.time() * 1000)
         params['timestamp'] = timestamp
         
-        # Копируем параметры для подписи (БЕЗ signature)
         sign_params = params.copy()
         query_string = '&'.join([f"{k}={v}" for k, v in sorted(sign_params.items())])
         
-        # Считаем подпись
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
             query_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         
-        # Добавляем подпись в запрос
         params['signature'] = signature
         
         headers = {'X-MEXC-APIKEY': self.api_key}
         url = f"{self.base_url}{endpoint}"
         
-        # --- ЛОГИРОВАНИЕ ---
         print(f"\n🔍 ЗАПРОС К API:")
         print(f"📌 URL: {url}")
         print(f"📦 ПАРАМЕТРЫ: {params}")
@@ -658,4 +654,14 @@ if __name__ == '__main__':
         print("Локальный запуск (long polling)")
         bot.infinity_polling()
     else:
+        # Принудительная установка вебхука при старте
+        render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+        webhook_url = f'https://{render_host}/{TOKEN}'
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Вебхук установлен: {webhook_url}")
+        except Exception as e:
+            print(f"⚠️ Ошибка установки вебхука: {str(e)}")
+        
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
