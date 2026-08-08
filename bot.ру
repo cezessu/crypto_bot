@@ -60,21 +60,23 @@ class MexcChecker:
         
         url = f"{self.base_url}{endpoint}"
         
-        # Логируем запрос (это будет видно в логах Render)
-        print(f"🔍 ЗАПРОС: {url}")
+        # --- МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ ---
+        print(f"\n🔍 ЗАПРОС К API:")
+        print(f"📌 URL: {url}")
         print(f"📦 ПАРАМЕТРЫ: {params}")
-        print(f"🔑 HEADERS: {headers}")
+        print(f"🔑 API KEY: {self.api_key[:10]}...{self.api_key[-4:]}")
+        print(f"📋 ПОЛНЫЙ URL: {url}?{'&'.join([f'{k}={v}' for k, v in sorted(params.items())])}")
         
         response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        # Логируем ответ
         print(f"📥 ОТВЕТ API: {response.status_code}")
         print(f"📄 ТЕКСТ: {response.text[:500]}")
+        print(f"📋 ПОЛНЫЙ ТЕКСТ: {response.text}")
         
         return response
 
     def check_lesson2(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -104,7 +106,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson3(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -131,7 +133,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson4(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -158,7 +160,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson5(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -185,7 +187,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson6(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
@@ -212,7 +214,7 @@ class MexcChecker:
             return False, f"Техническая ошибка: {str(e)}"
 
     def check_lesson7(self, uid):
-        params = {'uid': uid}
+        params = {'uid': str(uid)}
         try:
             resp = self._request('/api/v3/rebate/affiliate/referral', params)
             if resp.status_code != 200:
