@@ -3,14 +3,29 @@ import io
 import time
 import random
 import logging
+import sqlite3
 import threading
 import telebot
 from telebot import types
 from flask import Flask, request
 from PIL import Image, ImageDraw, ImageFont
 
-from eligibility import EligibilityStatus, evaluate_lesson, lesson_requires_referral_data
+from eligibility import (
+    ACTIVITY_PERIOD_MS,
+    ActivityState,
+    EligibilityStatus,
+    evaluate_lesson,
+    lesson_requires_referral_data,
+)
 from mexc_client import MexcClient, MexcClientError, MexcConfigurationError
+from referrals import build_referral_link, parse_referral_payload
+from storage import (
+    MexcUidAlreadyBoundError,
+    ReferralAssignment,
+    StorageError,
+    UserMexcUidConflictError,
+    create_storage_from_env,
+)
 
 
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -31,6 +46,13 @@ app = Flask(__name__)
 # --- НАСТРОЙКИ ---
 CHANNEL_USERNAME = "tradegrowthh"
 WEBHOOK_PATH = TOKEN
+storage = create_storage_from_env()
+logger.info("Persistent state initialized backend=%s", storage.backend_name)
+if os.environ.get('RENDER_EXTERNAL_HOSTNAME') and storage.backend_name == "sqlite":
+    logger.warning(
+        "Render is using ephemeral SQLite; configure SUPABASE_DATABASE_URL "
+        "for persistent state"
+    )
 
 # --- ФАЙЛЫ МЕТОДИЧЕК ---
 LESSON_FILES = {
@@ -59,9 +81,11 @@ MEXC_CACHE_TTL_SECONDS = 30
 MEXC_CACHE_MAX_ENTRIES = 256
 _mexc_cache = {}
 _mexc_cache_lock = threading.Lock()
+_bot_username = os.environ.get('BOT_USERNAME', '').strip().lstrip('@') or None
+_bot_username_lock = threading.Lock()
 
 
-def get_referral_cached(uid):
+def get_referral_cached(uid, *, force_refresh=False):
     """Avoid duplicate MEXC lookups for the same UID within this process."""
     if mexc is None:
         raise MexcConfigurationError("MEXC client is not configured")
@@ -69,7 +93,7 @@ def get_referral_cached(uid):
     now = time.monotonic()
     with _mexc_cache_lock:
         cached = _mexc_cache.get(uid)
-        if cached and cached[0] > now:
+        if not force_refresh and cached and cached[0] > now:
             return cached[1]
 
         expired_keys = [key for key, value in _mexc_cache.items() if value[0] <= now]
@@ -83,6 +107,15 @@ def get_referral_cached(uid):
             _mexc_cache.pop(next(iter(_mexc_cache)))
         _mexc_cache[uid] = (now + MEXC_CACHE_TTL_SECONDS, referral)
     return referral
+
+
+def get_bot_username():
+    """Resolve the public bot username without logging Telegram credentials."""
+    global _bot_username
+    with _bot_username_lock:
+        if _bot_username is None:
+            _bot_username = bot.get_me().username
+        return _bot_username
 
 # --- КАПЧА ---
 captcha_data = {}
@@ -248,51 +281,30 @@ def get_after_lesson_text(lesson_number):
     elif lesson_number == 3:
         return (
             "Красава! Ты освоил Price Action!\n\n"
-            "Теперь ты понимаешь, как читать свечные паттерны и кластеры. Дальше — объёмы.\n\n"
-            "Следующая методичка:\n\n"
-            "📘 Методичка №4 — Горизонтальный объём, Value Area, POC, трейлинг стопа\n"
-            "✅ Условие: Привести 1 друга, который зарегистрируется по твоей ссылке, пополнит от 100 USDT и совершит сделку\n\n"
-            "---\n\n"
-            "Как получить следующую методичку (№4):\n\n"
-            "1. Приведи друга на MEXC по своей реферальной ссылке\n"
-            "(Свою ссылку можно взять в разделе «Реферальная программа» на MEXC)\n"
-            "2. Дождись, пока он пополнит от 100 USDT и совершит сделку\n"
-            "3. Напиши боту команду: /get_lesson4\n"
-            "4. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
-            "5. Введи UID — и получишь четвёртый урок!\n\n"
+            "📘 Методичка №4 выдаётся за 1 квалифицированного приглашённого.\n\n"
+            "Получить персональную Telegram-ссылку: /referral\n"
+            "Друг должен перейти по ней, привязать свой MEXC UID, пополнить счёт "
+            "минимум на 100 USDT и совершить первую сделку.\n"
+            "После этого используй /get_lesson4.\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 4:
         return (
             "Ты лидер! Ты привёл первого друга!\n\n"
-            "Теперь у тебя есть команда. Время нарабатывать опыт.\n\n"
-            "Следующая методичка:\n\n"
-            "📘 Методичка №5 — Паттерны (вымпел, флаг, клин, М, W, Голова-плечи, Дракон)\n"
-            "✅ Условие: Совершить 20 сделок с момента регистрации на MEXC\n\n"
-            "---\n\n"
-            "Как получить следующую методичку (№5):\n\n"
-            "1. Продолжай торговать, пока не наберёшь 20 сделок\n"
-            "(Считаются любые сделки — даже с минимальным объёмом. Главное — количество)\n"
-            "2. Напиши боту команду: /get_lesson5\n"
-            "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
-            "4. Введи UID — и получишь пятый урок!\n\n"
+            "📘 Методичка №5 — подтверждение сохранения торговой активности.\n\n"
+            "После первой подтверждённой проверки MEXC начинается отсчёт 30 дней. "
+            "По истечении срока используй /get_lesson5. Бот повторно запросит MEXC "
+            "и проверит официальное время последней сделки.\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 5:
         return (
-            "Ты уже профи! 20 сделок — это серьёзный опыт!\n\n"
+            "Торговая активность спустя 30 дней подтверждена!\n\n"
             "Теперь ты готов к пониманию структуры рынка.\n\n"
-            "Следующая методичка:\n\n"
             "📘 Методичка №6 — Структура рынка, накопление/распределение, 90% Value Area\n"
-            "✅ Условие: Привести 2 друзей, которые зарегистрируются по твоей ссылке, пополнят от 100 USDT и совершат сделку\n\n"
-            "---\n\n"
-            "Как получить следующую методичку (№6):\n\n"
-            "1. Приведи двух друзей на MEXC по своей реферальной ссылке\n"
-            "(Свою ссылку можно взять в разделе «Реферальная программа» на MEXC)\n"
-            "2. Дождись, пока они пополнят от 100 USDT и совершат сделку\n"
-            "3. Напиши боту команду: /get_lesson6\n"
-            "4. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
-            "5. Введи UID — и получишь шестой урок!\n\n"
+            "✅ Условие: 2 квалифицированных приглашённых через персональную ссылку.\n"
+            "Ссылка и текущий счётчик: /referral\n"
+            "Проверка методички: /get_lesson6\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 6:
@@ -306,10 +318,9 @@ def get_after_lesson_text(lesson_number):
             "Как получить финальную методичку (№7):\n\n"
             "1. Наторгуй на объём 5 000 USDT ИЛИ приведи третьего друга\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт 300 USDT. Для 5 000 USDT нужно около 17 таких сделок. Реально за пару недель!)\n"
-            "(Свою реферальную ссылку можно взять в разделе «Реферальная программа» на MEXC)\n"
+            "(Свою персональную Telegram-ссылку можно получить командой /referral)\n"
             "2. Напиши боту команду: /get_lesson7\n"
-            "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
-            "4. Введи UID — и получишь финальный урок!\n\n"
+            "3. Если трёх приглашённых ещё нет, бот проверит привязанный MEXC UID.\n\n"
             "Это финиш! Ты почти у цели! 🚀"
         )
     elif lesson_number == 7:
@@ -363,11 +374,91 @@ def send_lesson(chat_id, lesson_number):
         bot.send_message(chat_id, after_text)
     return True
 
+
+def issue_lesson_once(chat_id, lesson_number):
+    """Atomically prevent repeated delivery of lessons 1-7."""
+    try:
+        claimed = storage.claim_lesson(chat_id, lesson_number)
+    except (StorageError, sqlite3.Error):
+        logger.error("Lesson delivery state is unavailable lesson=%s", lesson_number)
+        bot.send_message(chat_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
+        return False
+
+    if not claimed:
+        bot.send_message(chat_id, f"ℹ️ Методичка №{lesson_number} уже была вам выдана.")
+        return False
+
+    try:
+        delivered = send_lesson(chat_id, lesson_number)
+    except Exception:
+        try:
+            storage.release_lesson(chat_id, lesson_number)
+        except (StorageError, sqlite3.Error):
+            logger.error("Failed to release lesson delivery claim lesson=%s", lesson_number)
+        logger.error("Telegram lesson delivery failed lesson=%s", lesson_number)
+        bot.send_message(chat_id, "⚠️ Не удалось отправить файл. Попробуйте позже.")
+        return False
+
+    if not delivered:
+        try:
+            storage.release_lesson(chat_id, lesson_number)
+        except (StorageError, sqlite3.Error):
+            logger.error("Failed to release lesson delivery claim lesson=%s", lesson_number)
+    return delivered
+
 # --- ОБРАБОТЧИКИ ---
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    captcha_data.pop(message.chat.id, None)
-    send_captcha(message.chat.id, 0)
+    user_id = message.from_user.id
+    try:
+        storage.ensure_user(user_id)
+        inviter_id = parse_referral_payload(message.text)
+        if inviter_id is not None:
+            assignment = storage.assign_inviter(user_id, inviter_id)
+            if assignment is ReferralAssignment.ASSIGNED:
+                bot.send_message(user_id, "✅ Пригласивший пользователь зафиксирован.")
+            elif assignment is ReferralAssignment.SELF_REFERRAL:
+                bot.send_message(user_id, "ℹ️ Нельзя использовать собственную реферальную ссылку.")
+            elif assignment is ReferralAssignment.ALREADY_ASSIGNED:
+                bot.send_message(user_id, "ℹ️ Пригласивший уже был зафиксирован ранее и не изменён.")
+    except (StorageError, sqlite3.Error):
+        logger.error("Telegram referral state could not be persisted")
+        bot.send_message(
+            user_id,
+            "⚠️ Реферальная система временно недоступна. Обычный запуск продолжен."
+        )
+
+    captcha_data.pop(user_id, None)
+    send_captcha(user_id, 0)
+
+
+@bot.message_handler(commands=['referral', 'my_referral'])
+def referral_handler(message):
+    user_id = message.from_user.id
+    try:
+        storage.ensure_user(user_id)
+        referral_link = build_referral_link(get_bot_username(), user_id)
+        qualified_count = storage.count_qualified_invites(user_id)
+    except (StorageError, sqlite3.Error):
+        logger.error("Telegram referral storage is unavailable")
+        bot.send_message(user_id, "⚠️ Реферальная система временно недоступна.")
+        return
+    except Exception:
+        logger.error("Telegram bot username lookup failed")
+        bot.send_message(
+            user_id,
+            "⚠️ Не удалось сформировать реферальную ссылку. Попробуйте позже."
+        )
+        return
+
+    bot.send_message(
+        user_id,
+        "Ваша персональная ссылка:\n"
+        f"{referral_link}\n\n"
+        f"Квалифицированных приглашённых: {qualified_count}\n\n"
+        "Приглашённый засчитывается после привязки своего MEXC UID, "
+        "депозита от 100 USDT и первой сделки."
+    )
 
 @bot.message_handler(func=lambda msg: msg.from_user.id in captcha_data and not msg.text.startswith('/'))
 def captcha_input(message):
@@ -396,53 +487,141 @@ def handle_request_pdf(call):
 def handle_check_sub(call):
     user_id = call.from_user.id
     if is_subscribed(user_id):
-        send_lesson(user_id, 1)
+        delivered = issue_lesson_once(user_id, 1)
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id, "Методичка отправлена!")
+        bot.answer_callback_query(
+            call.id,
+            "Методичка отправлена!" if delivered else "Проверка завершена."
+        )
     else:
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
 
-# --- ОБЩАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ---
+# --- КОМАНДЫ ДЛЯ МЕТОДИЧЕК №2-№7 ---
 def process_lesson_request(message, lesson_number):
-    user_id = message.chat.id
+    user_id = message.from_user.id
+    try:
+        storage.ensure_user(user_id)
+        already_issued = storage.is_lesson_issued(user_id, lesson_number)
+        qualified_invites = storage.count_qualified_invites(user_id)
+        user_state = storage.get_user(user_id)
+    except (StorageError, sqlite3.Error):
+        logger.error("Lesson state storage is unavailable lesson=%s", lesson_number)
+        bot.send_message(user_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
+        return
 
-    if not lesson_requires_referral_data(lesson_number):
-        result = evaluate_lesson(lesson_number)
+    if already_issued:
+        bot.send_message(user_id, f"ℹ️ Методичка №{lesson_number} уже была вам выдана.")
+        return
+
+    if lesson_number in (4, 6) or (lesson_number == 7 and qualified_invites >= 3):
+        result = evaluate_lesson(
+            lesson_number,
+            qualified_invites=qualified_invites,
+        )
         bot.send_message(user_id, result.message)
+        if result.is_eligible:
+            issue_lesson_once(user_id, lesson_number)
+        return
+
+    activity_state = None
+    if user_state and user_state.activity_confirmed_at is not None:
+        activity_state = ActivityState(
+            confirmed_at_ms=user_state.activity_confirmed_at,
+            baseline_last_trade_time_ms=user_state.activity_baseline_last_trade_time,
+        )
+
+    now_ms = int(time.time() * 1000)
+    if lesson_number == 5:
+        preliminary = evaluate_lesson(
+            5,
+            activity_state=activity_state,
+            now_ms=now_ms,
+        )
+        if activity_state is None or now_ms < (
+            activity_state.confirmed_at_ms + ACTIVITY_PERIOD_MS
+        ):
+            bot.send_message(user_id, preliminary.message)
+            return
+
+    if not lesson_requires_referral_data(
+        lesson_number,
+        qualified_invites=qualified_invites,
+    ):
         return
 
     if mexc is None:
         bot.send_message(
             user_id,
-            "⚠️ Автоматическая проверка MEXC временно недоступна. Обратитесь к администратору."
+            "⚠️ Автоматическая проверка MEXC временно недоступна. "
+            "Обратитесь к администратору."
+        )
+        return
+
+    if user_state and user_state.mexc_uid:
+        check_lesson_with_uid(
+            user_id,
+            lesson_number,
+            user_state.mexc_uid,
+            force_refresh=(lesson_number == 5),
         )
         return
 
     instruction_text = (
-        "🔍 Где найти твой UID на MEXC:\n\n"
-        "1. Открой приложение или сайт MEXC\n"
-        "2. Нажми на иконку профиля в правом верхнем углу\n"
-        "3. Твой UID — это число, написанное под твоим именем\n\n"
-        "📌 Пример UID: 12345678\n\n"
-        "👇 Скопируй свой UID и отправь его в ответ на это сообщение:"
+        "🔍 Где найти свой UID на MEXC:\n\n"
+        "1. Откройте приложение или сайт MEXC.\n"
+        "2. Нажмите на иконку профиля.\n"
+        "3. Скопируйте числовой UID под своим именем.\n\n"
+        "Отправьте UID ответом на это сообщение:"
     )
     prompt_message = bot.send_message(user_id, instruction_text)
     bot.register_next_step_handler(prompt_message, process_uid, lesson_number)
 
+
 def process_uid(message, lesson_number):
-    user_id = message.chat.id
+    user_id = message.from_user.id
     uid = (message.text or '').strip()
     logger.info("Processing MEXC lesson request lesson=%s", lesson_number)
-    
+
     if not uid.isdigit():
-        bot.send_message(user_id, "❌ Введите только цифры! Попробуйте снова через /get_lesson" + str(lesson_number))
+        bot.send_message(
+            user_id,
+            "❌ UID должен содержать только цифры. Повторите через /get_lesson"
+            + str(lesson_number)
+        )
+        return
+
+    check_lesson_with_uid(
+        user_id,
+        lesson_number,
+        uid,
+        force_refresh=(lesson_number == 5),
+    )
+
+
+def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
+    try:
+        user_state = storage.get_user(user_id)
+    except (StorageError, sqlite3.Error):
+        logger.error("MEXC binding storage is unavailable lesson=%s", lesson_number)
+        bot.send_message(user_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
+        return
+    if user_state and user_state.mexc_uid and user_state.mexc_uid != uid:
+        bot.send_message(
+            user_id,
+            "❌ К вашему Telegram уже привязан другой MEXC UID. "
+            "Автоматическая замена запрещена."
+        )
         return
 
     bot.send_chat_action(user_id, 'typing')
     try:
-        referral = get_referral_cached(uid)
+        referral = get_referral_cached(uid, force_refresh=force_refresh)
     except MexcClientError as exc:
-        logger.warning("MEXC lesson check failed lesson=%s kind=%s", lesson_number, exc.kind)
+        logger.warning(
+            "MEXC lesson check failed lesson=%s kind=%s",
+            lesson_number,
+            exc.kind,
+        )
         bot.send_message(user_id, exc.public_message)
         return
 
@@ -453,12 +632,66 @@ def process_uid(message, lesson_number):
         )
         return
 
-    result = evaluate_lesson(lesson_number, referral)
+    try:
+        storage.bind_mexc_uid(user_id, uid)
+    except MexcUidAlreadyBoundError:
+        bot.send_message(
+            user_id,
+            "❌ Этот MEXC UID уже привязан к другому Telegram-пользователю."
+        )
+        return
+    except UserMexcUidConflictError:
+        bot.send_message(
+            user_id,
+            "❌ К вашему Telegram уже привязан другой MEXC UID."
+        )
+        return
+    except (StorageError, sqlite3.Error):
+        logger.error("MEXC UID binding could not be persisted lesson=%s", lesson_number)
+        bot.send_message(user_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
+        return
+
+    now_ms = int(time.time() * 1000)
+    try:
+        if referral.first_trade_time is not None:
+            storage.record_activity_confirmation(
+                user_id,
+                confirmed_at=now_ms,
+                baseline_last_trade_time=(
+                    referral.last_trade_time or referral.first_trade_time
+                ),
+            )
+        if (
+            referral.deposit_amount >= 100
+            and referral.first_trade_time is not None
+        ):
+            storage.mark_qualified(user_id)
+
+        user_state = storage.get_user(user_id)
+        qualified_invites = storage.count_qualified_invites(user_id)
+    except (StorageError, sqlite3.Error):
+        logger.error("MEXC eligibility state could not be persisted lesson=%s", lesson_number)
+        bot.send_message(user_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
+        return
+    activity_state = None
+    if user_state and user_state.activity_confirmed_at is not None:
+        activity_state = ActivityState(
+            confirmed_at_ms=user_state.activity_confirmed_at,
+            baseline_last_trade_time_ms=user_state.activity_baseline_last_trade_time,
+        )
+
+    result = evaluate_lesson(
+        lesson_number,
+        referral,
+        qualified_invites=qualified_invites,
+        activity_state=activity_state,
+        now_ms=now_ms if lesson_number == 5 else None,
+    )
     bot.send_message(user_id, result.message)
     if result.status is EligibilityStatus.ELIGIBLE:
-        send_lesson(user_id, lesson_number)
+        issue_lesson_once(user_id, lesson_number)
 
-# --- КОМАНДЫ ДЛЯ МЕТОДИЧЕК №2-№7 ---
+
 @bot.message_handler(commands=['get_lesson2'])
 def get_lesson2(message):
     process_lesson_request(message, 2)

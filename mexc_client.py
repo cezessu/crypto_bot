@@ -90,6 +90,7 @@ class ReferralData:
     deposit_amount: Decimal
     trading_amount: Decimal
     first_trade_time: Optional[int]
+    last_trade_time: Optional[int]
 
 
 class MexcClient:
@@ -256,7 +257,14 @@ class MexcClient:
             uid=uid,
             deposit_amount=self._parse_decimal(referral.get("depositAmount"), "depositAmount"),
             trading_amount=self._parse_decimal(referral.get("tradingAmount"), "tradingAmount"),
-            first_trade_time=self._parse_optional_timestamp(referral.get("firstTradeTime")),
+            first_trade_time=self._parse_optional_timestamp(
+                referral.get("firstTradeTime", referral.get("firstTrade")),
+                "firstTradeTime",
+            ),
+            last_trade_time=self._parse_optional_timestamp(
+                referral.get("lastTradeTime", referral.get("lastTrade")),
+                "lastTradeTime",
+            ),
         )
 
     @staticmethod
@@ -269,10 +277,19 @@ class MexcClient:
             raise MexcInvalidResponseError(f"MEXC field {field_name} is invalid") from exc
 
     @staticmethod
-    def _parse_optional_timestamp(value: object) -> Optional[int]:
+    def _parse_optional_timestamp(value: object, field_name: str) -> Optional[int]:
         if value in (None, ""):
             return None
         try:
-            return int(value)
+            timestamp = int(value)
         except (TypeError, ValueError) as exc:
-            raise MexcInvalidResponseError("MEXC field firstTradeTime is invalid") from exc
+            raise MexcInvalidResponseError(f"MEXC field {field_name} is invalid") from exc
+        if timestamp < 0:
+            raise MexcInvalidResponseError(f"MEXC field {field_name} is invalid")
+        if timestamp == 0:
+            return None
+        # Official examples use milliseconds, but normalizing a seconds value
+        # makes comparison safe if an older account is returned in that form.
+        if 0 < timestamp < 100_000_000_000:
+            timestamp *= 1000
+        return timestamp

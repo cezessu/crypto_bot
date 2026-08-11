@@ -1,19 +1,22 @@
-"""Lesson eligibility rules based only on documented public MEXC fields."""
+"""Eligibility rules based on persisted Telegram state and public MEXC fields."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Callable, Dict, Optional, Tuple
+from typing import Optional
 
 from mexc_client import ReferralData
+
+
+DAY_MS = 24 * 60 * 60 * 1000
+ACTIVITY_PERIOD_MS = 30 * DAY_MS
 
 
 class EligibilityStatus(str, Enum):
     ELIGIBLE = "eligible"
     INELIGIBLE = "ineligible"
-    UNVERIFIABLE = "unverifiable"
 
 
 @dataclass(frozen=True)
@@ -27,11 +30,9 @@ class EligibilityResult:
 
 
 @dataclass(frozen=True)
-class ConditionDefinition:
-    key: str
-    lesson_number: int
-    evaluator: Optional[Callable[[ReferralData], EligibilityResult]]
-    unavailable_message: str = ""
+class ActivityState:
+    confirmed_at_ms: int
+    baseline_last_trade_time_ms: Optional[int] = None
 
 
 def _format_decimal(value: Decimal) -> str:
@@ -72,7 +73,6 @@ def _volume(referral: ReferralData, threshold: Decimal, lesson_number: int) -> E
             f"✅ Условие выполнено: торговый объём "
             f"{_format_decimal(referral.trading_amount)} USDT.",
         )
-
     return EligibilityResult(
         EligibilityStatus.INELIGIBLE,
         f"❌ Торговый объём {_format_decimal(referral.trading_amount)} USDT. "
@@ -80,115 +80,106 @@ def _volume(referral: ReferralData, threshold: Decimal, lesson_number: int) -> E
     )
 
 
-UNVERIFIABLE_MESSAGES = {
-    "lesson_4_qualified_friend": (
-        "ℹ️ Методичка №4 временно недоступна для автоматической проверки: "
-        "публичный MEXC API не показывает квалифицированных друзей конкретного UID. "
-        "Критерий будет заменён после согласования нового проверяемого условия."
-    ),
-    "lesson_5_trade_count": (
-        "ℹ️ Методичка №5 временно недоступна для автоматической проверки: "
-        "публичный MEXC API не возвращает достоверное количество сделок реферала. "
-        "Критерий будет заменён после согласования нового проверяемого условия."
-    ),
-    "lesson_6_qualified_friends": (
-        "ℹ️ Методичка №6 временно недоступна для автоматической проверки: "
-        "публичный MEXC API не показывает квалифицированных друзей конкретного UID. "
-        "Критерий будет заменён после согласования нового проверяемого условия."
-    ),
-    "lesson_7_qualified_friends": (
-        "ℹ️ Альтернативная ветка методички №7 по приглашённым друзьям временно "
-        "недоступна для автоматической проверки через публичный MEXC API."
-    ),
-}
+def _qualified_invites(count: int, required: int, lesson_number: int) -> EligibilityResult:
+    if count >= required:
+        return EligibilityResult(
+            EligibilityStatus.ELIGIBLE,
+            f"✅ Условие выполнено: квалифицированных приглашённых — {count}.",
+        )
+    return EligibilityResult(
+        EligibilityStatus.INELIGIBLE,
+        f"❌ Для методички №{lesson_number} нужно квалифицированных приглашённых: "
+        f"{required}. Сейчас подтверждено: {count}.",
+    )
 
 
-CONDITIONS: Dict[str, ConditionDefinition] = {
-    "lesson_2_deposit_and_first_trade": ConditionDefinition(
-        "lesson_2_deposit_and_first_trade", 2, _lesson2
-    ),
-    "lesson_3_trading_volume": ConditionDefinition(
-        "lesson_3_trading_volume", 3, lambda referral: _volume(referral, Decimal("300"), 3)
-    ),
-    "lesson_4_qualified_friend": ConditionDefinition(
-        "lesson_4_qualified_friend",
-        4,
-        None,
-        UNVERIFIABLE_MESSAGES["lesson_4_qualified_friend"],
-    ),
-    "lesson_5_trade_count": ConditionDefinition(
-        "lesson_5_trade_count",
-        5,
-        None,
-        UNVERIFIABLE_MESSAGES["lesson_5_trade_count"],
-    ),
-    "lesson_6_qualified_friends": ConditionDefinition(
-        "lesson_6_qualified_friends",
-        6,
-        None,
-        UNVERIFIABLE_MESSAGES["lesson_6_qualified_friends"],
-    ),
-    "lesson_7_trading_volume": ConditionDefinition(
-        "lesson_7_trading_volume", 7, lambda referral: _volume(referral, Decimal("5000"), 7)
-    ),
-    "lesson_7_qualified_friends": ConditionDefinition(
-        "lesson_7_qualified_friends",
-        7,
-        None,
-        UNVERIFIABLE_MESSAGES["lesson_7_qualified_friends"],
-    ),
-}
-
-
-LESSON_CONDITIONS: Dict[int, Tuple[str, ...]] = {
-    2: ("lesson_2_deposit_and_first_trade",),
-    3: ("lesson_3_trading_volume",),
-    4: ("lesson_4_qualified_friend",),
-    5: ("lesson_5_trade_count",),
-    6: ("lesson_6_qualified_friends",),
-    7: ("lesson_7_trading_volume", "lesson_7_qualified_friends"),
-}
-
-
-def evaluate_condition(
-    condition_key: str,
+def _lesson5(
     referral: Optional[ReferralData],
+    activity_state: Optional[ActivityState],
+    now_ms: int,
 ) -> EligibilityResult:
-    definition = CONDITIONS[condition_key]
-    if definition.evaluator is None:
-        return EligibilityResult(EligibilityStatus.UNVERIFIABLE, definition.unavailable_message)
-    if referral is None:
-        raise ValueError(f"Condition {condition_key} requires referral data")
-    return definition.evaluator(referral)
+    if activity_state is None:
+        return EligibilityResult(
+            EligibilityStatus.INELIGIBLE,
+            "❌ Сначала подтвердите торговую активность через проверку своего MEXC UID. "
+            "После первого подтверждения начнётся отсчёт 30 дней.",
+        )
+
+    eligible_after = activity_state.confirmed_at_ms + ACTIVITY_PERIOD_MS
+    if now_ms < eligible_after:
+        remaining_days = max(1, (eligible_after - now_ms + DAY_MS - 1) // DAY_MS)
+        return EligibilityResult(
+            EligibilityStatus.INELIGIBLE,
+            f"⏳ Методичку №5 можно проверить после истечения 30 дней. "
+            f"Осталось примерно {remaining_days} дн.",
+        )
+
+    if referral is None or referral.last_trade_time is None:
+        return EligibilityResult(
+            EligibilityStatus.INELIGIBLE,
+            "❌ MEXC не подтверждает последнюю торговую активность после контрольной даты.",
+        )
+
+    if referral.last_trade_time < eligible_after:
+        return EligibilityResult(
+            EligibilityStatus.INELIGIBLE,
+            "❌ Прошло 30 дней, но MEXC пока не показывает сделку после контрольной даты. "
+            "Продолжите торговую активность и повторите проверку.",
+        )
+
+    return EligibilityResult(
+        EligibilityStatus.ELIGIBLE,
+        "✅ MEXC подтвердил торговую активность после истечения 30 дней.",
+    )
 
 
 def evaluate_lesson(
     lesson_number: int,
     referral: Optional[ReferralData] = None,
+    *,
+    qualified_invites: int = 0,
+    activity_state: Optional[ActivityState] = None,
+    now_ms: Optional[int] = None,
 ) -> EligibilityResult:
-    condition_keys = LESSON_CONDITIONS[lesson_number]
-    results = [evaluate_condition(condition_key, referral) for condition_key in condition_keys]
-
-    eligible_result = next((result for result in results if result.is_eligible), None)
-    if eligible_result:
-        return eligible_result
-
-    verifiable_results = [
-        result for result in results if result.status is not EligibilityStatus.UNVERIFIABLE
-    ]
-    unavailable_results = [
-        result for result in results if result.status is EligibilityStatus.UNVERIFIABLE
-    ]
-    if verifiable_results:
-        message_parts = [result.message for result in verifiable_results]
-        message_parts.extend(result.message for result in unavailable_results)
+    if lesson_number == 2:
+        if referral is None:
+            raise ValueError("Lesson 2 requires MEXC referral data")
+        return _lesson2(referral)
+    if lesson_number == 3:
+        if referral is None:
+            raise ValueError("Lesson 3 requires MEXC referral data")
+        return _volume(referral, Decimal("300"), 3)
+    if lesson_number == 4:
+        return _qualified_invites(qualified_invites, 1, 4)
+    if lesson_number == 5:
+        if now_ms is None:
+            raise ValueError("Lesson 5 requires current time")
+        return _lesson5(referral, activity_state, now_ms)
+    if lesson_number == 6:
+        return _qualified_invites(qualified_invites, 2, 6)
+    if lesson_number == 7:
+        if qualified_invites >= 3:
+            return _qualified_invites(qualified_invites, 3, 7)
+        if referral is None:
+            return EligibilityResult(
+                EligibilityStatus.INELIGIBLE,
+                f"❌ Для методички №7 нужен торговый объём от 5000 USDT "
+                f"или 3 квалифицированных приглашённых. Сейчас приглашённых: {qualified_invites}.",
+            )
+        volume_result = _volume(referral, Decimal("5000"), 7)
+        if volume_result.is_eligible:
+            return volume_result
         return EligibilityResult(
-            verifiable_results[0].status,
-            "\n\n".join(message_parts),
+            EligibilityStatus.INELIGIBLE,
+            volume_result.message
+            + f" Альтернатива — 3 квалифицированных приглашённых; сейчас: {qualified_invites}.",
         )
+    raise ValueError(f"Unknown lesson number: {lesson_number}")
 
-    return unavailable_results[0]
 
-
-def lesson_requires_referral_data(lesson_number: int) -> bool:
-    return CONDITIONS[LESSON_CONDITIONS[lesson_number][0]].evaluator is not None
+def lesson_requires_referral_data(lesson_number: int, *, qualified_invites: int = 0) -> bool:
+    if lesson_number in (2, 3, 5):
+        return True
+    if lesson_number == 7:
+        return qualified_invites < 3
+    return False
