@@ -4,6 +4,10 @@ import unittest
 from decimal import Decimal
 from urllib.parse import urlencode
 
+from _requests_stub import install_requests_stub_if_missing
+
+install_requests_stub_if_missing()
+
 import requests
 
 from mexc_client import (
@@ -43,7 +47,13 @@ class FakeSession:
         return self.response
 
 
-def referral_payload(uid="12345678", deposit="150.25", volume="5123.75", first_trade=123456789):
+def referral_payload(
+    uid="12345678",
+    deposit="150.25",
+    volume="5123.75",
+    first_trade=1690000000000,
+    last_trade=1700000000000,
+):
     return {
         "success": True,
         "code": 0,
@@ -59,6 +69,7 @@ def referral_payload(uid="12345678", deposit="150.25", volume="5123.75", first_t
                     "depositAmount": deposit,
                     "tradingAmount": volume,
                     "firstTradeTime": first_trade,
+                    "lastTradeTime": last_trade,
                 }
             ],
         },
@@ -104,7 +115,8 @@ class MexcClientTests(unittest.TestCase):
         self.assertEqual(referral.uid, "12345678")
         self.assertEqual(referral.deposit_amount, Decimal("150.25"))
         self.assertEqual(referral.trading_amount, Decimal("5123.75"))
-        self.assertEqual(referral.first_trade_time, 123456789)
+        self.assertEqual(referral.first_trade_time, 1690000000000)
+        self.assertEqual(referral.last_trade_time, 1700000000000)
         self.assertEqual(session.calls[0]["headers"], {"X-MEXC-APIKEY": "test-key"})
         self.assertIn("?uid=12345678&startTime=", session.calls[0]["url"])
         self.assertIn("&signature=", session.calls[0]["url"])
@@ -122,6 +134,21 @@ class MexcClientTests(unittest.TestCase):
         )
 
         self.assertIsNone(client.get_affiliate_referral("12345678"))
+
+    def test_trade_timestamps_in_seconds_are_normalized(self):
+        client, _ = self.make_client(
+            FakeResponse(
+                payload=referral_payload(
+                    first_trade=1690000000,
+                    last_trade=1700000000,
+                )
+            )
+        )
+
+        referral = client.get_affiliate_referral("12345678")
+
+        self.assertEqual(referral.first_trade_time, 1690000000000)
+        self.assertEqual(referral.last_trade_time, 1700000000000)
 
     def test_timeout_is_mapped_to_safe_error(self):
         client, _ = self.make_client(exception=requests.Timeout("secret URL"))
@@ -175,6 +202,18 @@ class MexcClientTests(unittest.TestCase):
             MexcClient.from_env(
                 {"MEXC_API_KEY": "test-key", "MEXC_API_SECRET": "secret with-space"}
             )
+
+    def test_surrounding_environment_whitespace_is_trimmed(self):
+        client = MexcClient.from_env(
+            {
+                "MEXC_API_KEY": "  test-key\n",
+                "MEXC_API_SECRET": "\t test-secret  ",
+            }
+        )
+
+        self.assertIsNotNone(client)
+        self.assertEqual(client.api_key, "test-key")
+        self.assertEqual(client.api_secret, "test-secret")
 
 
 if __name__ == "__main__":

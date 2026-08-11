@@ -85,6 +85,47 @@ _bot_username = os.environ.get('BOT_USERNAME', '').strip().lstrip('@') or None
 _bot_username_lock = threading.Lock()
 
 
+# Постоянное меню видно внизу диалога после первого прохождения капчи. Оно
+# заменяет необходимость искать и вводить команды вручную.
+MENU_LESSON_BUTTONS = {
+    "📘 Методичка №1": 1,
+    "📘 Методичка №2": 2,
+    "📘 Методичка №3": 3,
+    "📘 Методичка №4": 4,
+    "📘 Методичка №5": 5,
+    "📘 Методичка №6": 6,
+    "📘 Методичка №7": 7,
+}
+MENU_REFERRAL_BUTTON = "👥 Моя ссылка и друзья"
+
+
+def build_main_menu():
+    """Return a compact persistent keyboard for the course flow."""
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(
+        types.KeyboardButton("📘 Методичка №1"),
+        types.KeyboardButton("📘 Методичка №2"),
+    )
+    markup.row(
+        types.KeyboardButton("📘 Методичка №3"),
+        types.KeyboardButton("📘 Методичка №4"),
+    )
+    markup.row(
+        types.KeyboardButton("📘 Методичка №5"),
+        types.KeyboardButton("📘 Методичка №6"),
+    )
+    markup.row(
+        types.KeyboardButton("📘 Методичка №7"),
+        types.KeyboardButton(MENU_REFERRAL_BUTTON),
+    )
+    return markup
+
+
+def send_main_menu(chat_id, text="Выберите методичку или откройте свою реферальную ссылку:"):
+    bot.send_message(chat_id, text, reply_markup=build_main_menu())
+
+
 def get_referral_cached(uid, *, force_refresh=False):
     """Avoid duplicate MEXC lookups for the same UID within this process."""
     if mexc is None:
@@ -256,7 +297,7 @@ def get_after_lesson_text(lesson_number):
             "---\n\n"
             "Как получить следующую методичку (№2):\n\n"
             "1. Пополни MEXC от 100 USDT и соверши первую сделку\n"
-            "2. Напиши боту команду: /get_lesson2\n"
+            "2. Нажми кнопку «📘 Методичка №2» в меню внизу\n"
             "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
             "4. Введи UID — и получишь второй урок!\n"
             "(UID можно найти в профиле MEXC — это число из 8–10 цифр)\n\n"
@@ -273,7 +314,7 @@ def get_after_lesson_text(lesson_number):
             "Как получить следующую методичку (№3):\n\n"
             "1. Продолжай торговать, пока общий объём не достигнет 300 USDT\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт объём 300 USDT. Всего одна такая сделка — и условие выполнено!)\n"
-            "2. Напиши боту команду: /get_lesson3\n"
+            "2. Нажми кнопку «📘 Методичка №3» в меню внизу\n"
             "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
             "4. Введи UID — и получишь третий урок!\n\n"
             "Удачи на пути к профи! 🚀"
@@ -282,10 +323,10 @@ def get_after_lesson_text(lesson_number):
         return (
             "Красава! Ты освоил Price Action!\n\n"
             "📘 Методичка №4 выдаётся за 1 квалифицированного приглашённого.\n\n"
-            "Получить персональную Telegram-ссылку: /referral\n"
+            "Нажми «👥 Моя ссылка и друзья» в меню внизу.\n"
             "Друг должен перейти по ней, привязать свой MEXC UID, пополнить счёт "
             "минимум на 100 USDT и совершить первую сделку.\n"
-            "После этого используй /get_lesson4.\n\n"
+            "После этого нажми «📘 Методичка №4».\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 4:
@@ -293,7 +334,7 @@ def get_after_lesson_text(lesson_number):
             "Ты лидер! Ты привёл первого друга!\n\n"
             "📘 Методичка №5 — подтверждение сохранения торговой активности.\n\n"
             "После первой подтверждённой проверки MEXC начинается отсчёт 30 дней. "
-            "По истечении срока используй /get_lesson5. Бот повторно запросит MEXC "
+            "По истечении срока нажми «📘 Методичка №5». Бот повторно запросит MEXC "
             "и проверит официальное время последней сделки.\n\n"
             "Удачи на пути к профи! 🚀"
         )
@@ -303,8 +344,8 @@ def get_after_lesson_text(lesson_number):
             "Теперь ты готов к пониманию структуры рынка.\n\n"
             "📘 Методичка №6 — Структура рынка, накопление/распределение, 90% Value Area\n"
             "✅ Условие: 2 квалифицированных приглашённых через персональную ссылку.\n"
-            "Ссылка и текущий счётчик: /referral\n"
-            "Проверка методички: /get_lesson6\n\n"
+            "Ссылка и текущий счётчик — кнопка «👥 Моя ссылка и друзья».\n"
+            "Проверка методички — кнопка «📘 Методичка №6».\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 6:
@@ -318,8 +359,8 @@ def get_after_lesson_text(lesson_number):
             "Как получить финальную методичку (№7):\n\n"
             "1. Наторгуй на объём 5 000 USDT ИЛИ приведи третьего друга\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт 300 USDT. Для 5 000 USDT нужно около 17 таких сделок. Реально за пару недель!)\n"
-            "(Свою персональную Telegram-ссылку можно получить командой /referral)\n"
-            "2. Напиши боту команду: /get_lesson7\n"
+            "(Свою персональную Telegram-ссылку можно получить кнопкой «👥 Моя ссылка и друзья»)\n"
+            "2. Нажми кнопку «📘 Методичка №7»\n"
             "3. Если трёх приглашённых ещё нет, бот проверит привязанный MEXC UID.\n\n"
             "Это финиш! Ты почти у цели! 🚀"
         )
@@ -371,7 +412,7 @@ def send_lesson(chat_id, lesson_number):
 
     after_text = get_after_lesson_text(lesson_number)
     if after_text:
-        bot.send_message(chat_id, after_text)
+        bot.send_message(chat_id, after_text, reply_markup=build_main_menu())
     return True
 
 
@@ -460,6 +501,11 @@ def referral_handler(message):
         "депозита от 100 USDT и первой сделки."
     )
 
+
+@bot.message_handler(commands=['menu'])
+def menu_handler(message):
+    send_main_menu(message.from_user.id)
+
 @bot.message_handler(func=lambda msg: msg.from_user.id in captcha_data and not msg.text.startswith('/'))
 def captcha_input(message):
     user_id = message.from_user.id
@@ -468,18 +514,30 @@ def captcha_input(message):
         btn_get = types.InlineKeyboardButton("📥 Забрать методичку", callback_data='request_pdf')
         markup.add(btn_get)
         bot.send_message(user_id, WELCOME_TEXT, reply_markup=markup)
+        send_main_menu(
+            user_id,
+            "Готово! Кнопки методичек теперь всегда доступны внизу диалога.",
+        )
 
-@bot.callback_query_handler(func=lambda call: call.data == 'request_pdf')
-def handle_request_pdf(call):
+
+def build_subscription_markup():
     markup = types.InlineKeyboardMarkup()
     btn_sub = types.InlineKeyboardButton("🔔 Подписаться на канал", url=f'https://t.me/{CHANNEL_USERNAME}')
     btn_check = types.InlineKeyboardButton("✅ Проверить подписку", callback_data='check_sub')
     markup.add(btn_sub, btn_check)
+    return markup
+
+
+def show_lesson1_subscription_prompt(chat_id):
+    bot.send_message(chat_id, SUBSCRIBE_TEXT, reply_markup=build_subscription_markup())
+
+@bot.callback_query_handler(func=lambda call: call.data == 'request_pdf')
+def handle_request_pdf(call):
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         text=SUBSCRIBE_TEXT,
-        reply_markup=markup
+        reply_markup=build_subscription_markup()
     )
     bot.answer_callback_query(call.id)
 
@@ -495,6 +553,23 @@ def handle_check_sub(call):
         )
     else:
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
+
+
+@bot.message_handler(
+    func=lambda message: (message.text or '') in MENU_LESSON_BUTTONS
+    or (message.text or '') == MENU_REFERRAL_BUTTON
+)
+def main_menu_handler(message):
+    action = message.text or ''
+    if action == MENU_REFERRAL_BUTTON:
+        referral_handler(message)
+        return
+
+    lesson_number = MENU_LESSON_BUTTONS[action]
+    if lesson_number == 1:
+        show_lesson1_subscription_prompt(message.from_user.id)
+        return
+    process_lesson_request(message, lesson_number)
 
 # --- КОМАНДЫ ДЛЯ МЕТОДИЧЕК №2-№7 ---
 def process_lesson_request(message, lesson_number):

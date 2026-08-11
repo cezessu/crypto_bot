@@ -125,8 +125,12 @@ class MexcClient:
         """Create a client from Render variables, or return None when absent."""
 
         source = os.environ if environ is None else environ
-        api_key = source.get("MEXC_API_KEY", "")
-        api_secret = source.get("MEXC_API_SECRET", "")
+        # Render text fields can retain an accidental trailing newline when a
+        # value is pasted.  It is not part of the API credential, so remove
+        # only surrounding whitespace.  Whitespace *inside* a credential is
+        # still rejected by _validate_credentials below.
+        api_key = source.get("MEXC_API_KEY", "").strip()
+        api_secret = source.get("MEXC_API_SECRET", "").strip()
         if not api_key or not api_secret:
             return None
         return cls(api_key, api_secret, **kwargs)
