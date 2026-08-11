@@ -66,6 +66,8 @@ class BotImportTests(unittest.TestCase):
             self.assertTrue(callable(module.main_menu_handler))
             self.assertEqual(module.MENU_LESSON_BUTTONS["📘 Методичка №2"], 2)
             self.assertEqual(module.MENU_LESSON_BUTTONS["📘 Методичка №7"], 7)
+            self.assertNotEqual(module.WEBHOOK_PATH, "123456:TEST")
+            self.assertTrue(module.WEBHOOK_PATH.startswith("telegram-"))
             for lesson_number in range(2, 8):
                 self.assertTrue(callable(getattr(module, f"get_lesson{lesson_number}")))
 

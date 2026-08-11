@@ -5,6 +5,7 @@ import random
 import logging
 import sqlite3
 import threading
+import hashlib
 import telebot
 from telebot import types
 from flask import Flask, request
@@ -45,7 +46,10 @@ app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
 CHANNEL_USERNAME = "tradegrowthh"
-WEBHOOK_PATH = TOKEN
+# Never put BOT_TOKEN into a public URL: Flask/Render access logs include the
+# request path.  The path remains stable for this bot but cannot be reversed
+# to obtain the Telegram token.
+WEBHOOK_PATH = "telegram-" + hashlib.sha256(TOKEN.encode("utf-8")).hexdigest()[:32]
 storage = create_storage_from_env()
 logger.info("Persistent state initialized backend=%s", storage.backend_name)
 if os.environ.get('RENDER_EXTERNAL_HOSTNAME') and storage.backend_name == "sqlite":
