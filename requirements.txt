@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 Flask
 Pillow
+requests>=2.31.0,<3.0.0
