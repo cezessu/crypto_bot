@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 MEXC_BASE_URL = "https://api.mexc.com"
 AFFILIATE_REFERRAL_ENDPOINT = "/api/v3/rebate/affiliate/referral"
 AFFILIATE_HISTORY_START_MS = 1609459200000  # 2021-01-01 UTC
+# MEXC rejects affiliate queries whose time range exceeds 30 days.
+AFFILIATE_QUERY_WINDOW_MS = (30 * 24 * 60 * 60 * 1000) - 1
 
 
 class MexcClientError(Exception):
@@ -225,50 +227,62 @@ class MexcClient:
     def get_affiliate_referral(self, uid: str) -> Optional[ReferralData]:
         """Return a direct affiliate referral by UID, or None when it is absent."""
 
-        timestamp_ms = self.clock_ms()
-        payload = self._request(
-            AFFILIATE_REFERRAL_ENDPOINT,
-            (
-                ("uid", uid),
-                ("startTime", AFFILIATE_HISTORY_START_MS),
-                ("endTime", timestamp_ms),
-                ("page", 1),
-                ("pageSize", 10),
-            ),
-            timestamp_ms=timestamp_ms,
-        )
+        window_end_ms = self.clock_ms()
+        while window_end_ms >= AFFILIATE_HISTORY_START_MS:
+            window_start_ms = max(
+                AFFILIATE_HISTORY_START_MS,
+                window_end_ms - AFFILIATE_QUERY_WINDOW_MS,
+            )
+            request_timestamp_ms = self.clock_ms()
+            payload = self._request(
+                AFFILIATE_REFERRAL_ENDPOINT,
+                (
+                    ("uid", uid),
+                    ("startTime", window_start_ms),
+                    ("endTime", window_end_ms),
+                    ("page", 1),
+                    ("pageSize", 10),
+                ),
+                timestamp_ms=request_timestamp_ms,
+            )
 
-        data = payload.get("data")
-        if not isinstance(data, Mapping):
-            raise MexcInvalidResponseError("MEXC response has no data object")
-        result_list = data.get("resultList")
-        if not isinstance(result_list, list):
-            raise MexcInvalidResponseError("MEXC response has no resultList")
+            data = payload.get("data")
+            if not isinstance(data, Mapping):
+                raise MexcInvalidResponseError("MEXC response has no data object")
+            result_list = data.get("resultList")
+            if not isinstance(result_list, list):
+                raise MexcInvalidResponseError("MEXC response has no resultList")
 
-        referral = next(
-            (
-                item
-                for item in result_list
-                if isinstance(item, Mapping) and str(item.get("uid", "")) == uid
-            ),
-            None,
-        )
-        if referral is None:
-            return None
+            referral = next(
+                (
+                    item
+                    for item in result_list
+                    if isinstance(item, Mapping) and str(item.get("uid", "")) == uid
+                ),
+                None,
+            )
+            if referral is not None:
+                return ReferralData(
+                    uid=uid,
+                    deposit_amount=self._parse_decimal(
+                        referral.get("depositAmount"), "depositAmount"
+                    ),
+                    trading_amount=self._parse_decimal(
+                        referral.get("tradingAmount"), "tradingAmount"
+                    ),
+                    first_trade_time=self._parse_optional_timestamp(
+                        referral.get("firstTradeTime", referral.get("firstTrade")),
+                        "firstTradeTime",
+                    ),
+                    last_trade_time=self._parse_optional_timestamp(
+                        referral.get("lastTradeTime", referral.get("lastTrade")),
+                        "lastTradeTime",
+                    ),
+                )
 
-        return ReferralData(
-            uid=uid,
-            deposit_amount=self._parse_decimal(referral.get("depositAmount"), "depositAmount"),
-            trading_amount=self._parse_decimal(referral.get("tradingAmount"), "tradingAmount"),
-            first_trade_time=self._parse_optional_timestamp(
-                referral.get("firstTradeTime", referral.get("firstTrade")),
-                "firstTradeTime",
-            ),
-            last_trade_time=self._parse_optional_timestamp(
-                referral.get("lastTradeTime", referral.get("lastTrade")),
-                "lastTradeTime",
-            ),
-        )
+            window_end_ms = window_start_ms - 1
+
+        return None
 
     @staticmethod
     def _parse_decimal(value: object, field_name: str) -> Decimal:
