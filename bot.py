@@ -818,11 +818,16 @@ def fallback_text_handler(message):
     )
 
 # --- ЗАПУСК ---
+IS_RENDER = bool(os.environ.get('RENDER_EXTERNAL_HOSTNAME'))
+
+# Gunicorn imports ``app`` from this module instead of executing it as a
+# script, so configure the Telegram webhook during module initialization.
+if IS_RENDER:
+    configure_render_webhook()
+
 if __name__ == '__main__':
-    if os.environ.get('RENDER_EXTERNAL_HOSTNAME') is None:
+    if not IS_RENDER:
         logger.info("Starting bot in long-polling mode")
         bot.infinity_polling()
     else:
-        configure_render_webhook()
-        
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

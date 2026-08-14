@@ -1,5 +1,6 @@
 pyTelegramBotAPI
 Flask
+gunicorn
 Pillow
 requests>=2.31.0,<3.0.0
 psycopg[binary]>=3.2.0,<4.0.0
