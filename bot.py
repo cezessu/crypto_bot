@@ -255,8 +255,9 @@ def configure_render_webhook():
 
     webhook_url = f'https://{render_host}/{WEBHOOK_PATH}'
     try:
-        bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
+        # setWebhook replaces the previous URL atomically. Removing it first
+        # creates a delivery gap where Telegram updates can be missed.
+        bot.set_webhook(url=webhook_url, drop_pending_updates=False)
         logger.info("Telegram webhook configured")
         return True
     except Exception:
@@ -267,18 +268,30 @@ def configure_render_webhook():
 
 @app.route('/' + WEBHOOK_PATH, methods=['POST'])
 def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
+    try:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            logger.warning("Telegram webhook received invalid JSON")
+            return "Bad request", 400
+        update = telebot.types.Update.de_json(payload)
+        bot.process_new_updates([update])
+    except Exception as exc:
+        # Do not include exception text: transport/database exceptions may
+        # contain request URLs or credentials.
+        logger.error(
+            "Telegram update processing failed type=%s",
+            type(exc).__name__,
+        )
+        return "Temporary failure", 500
     return "!", 200
 
 @app.route('/')
 def webhook():
     if not os.environ.get('RENDER_EXTERNAL_HOSTNAME'):
         return "RENDER_EXTERNAL_HOSTNAME not set.", 500
-    if configure_render_webhook():
-        return "Webhook configured", 200
-    return "Webhook configuration failed", 500
+    # Render health checks must be read-only. Reconfiguring the Telegram
+    # webhook on every GET can briefly interrupt update delivery.
+    return "Bot is running", 200
 
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = (
@@ -794,6 +807,15 @@ def get_lesson6(message):
 @bot.message_handler(commands=['get_lesson7'])
 def get_lesson7(message):
     process_lesson_request(message, 7)
+
+
+@bot.message_handler(content_types=['text'], func=lambda message: True)
+def fallback_text_handler(message):
+    """Never leave an ordinary text message without a clear next action."""
+    send_main_menu(
+        message.from_user.id,
+        "Не понял сообщение. Выберите действие кнопкой ниже или отправьте /start.",
+    )
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
