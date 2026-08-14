@@ -125,12 +125,11 @@ class MexcClient:
         """Create a client from Render variables, or return None when absent."""
 
         source = os.environ if environ is None else environ
-        # Render text fields can retain an accidental trailing newline when a
-        # value is pasted.  It is not part of the API credential, so remove
-        # only surrounding whitespace.  Whitespace *inside* a credential is
-        # still rejected by _validate_credentials below.
-        api_key = source.get("MEXC_API_KEY", "").strip()
-        api_secret = source.get("MEXC_API_SECRET", "").strip()
+        # MEXC credentials never contain whitespace. Mobile copy/paste can
+        # insert a line break where the long Secret Key wraps on screen, so
+        # normalize all whitespace before validation and signing.
+        api_key = "".join(source.get("MEXC_API_KEY", "").split())
+        api_secret = "".join(source.get("MEXC_API_SECRET", "").split())
         if not api_key or not api_secret:
             return None
         return cls(api_key, api_secret, **kwargs)
