@@ -36,12 +36,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def log_telegram_error(context, exception):
+    """Log Telegram failures without exposing request URLs or bot tokens."""
+    error_code = getattr(exception, 'error_code', None)
+    description = getattr(exception, 'description', None)
+    if description:
+        logger.error(
+            "%s type=%s code=%s description=%s",
+            context,
+            type(exception).__name__,
+            error_code,
+            str(description)[:200],
+        )
+    else:
+        logger.error("%s type=%s", context, type(exception).__name__)
+
+
+class SafeBotExceptionHandler:
+    """Make exceptions from TeleBot worker threads visible in Render logs."""
+
+    def handle(self, exception):
+        log_telegram_error("Telegram handler failed", exception)
+        return True
+
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения")
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, exception_handler=SafeBotExceptionHandler())
 app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
@@ -207,17 +231,25 @@ def draw_captcha(text):
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
-    return buf.getvalue()
+    return buf
 
 def send_captcha(chat_id, attempts):
     text = generate_captcha_text()
-    img_bytes = draw_captcha(text)
+    image_buffer = draw_captcha(text)
+    try:
+        bot.send_photo(
+            chat_id,
+            types.InputFile(image_buffer, file_name="captcha.png"),
+            caption="Введите символы с картинки (заглавные буквы/цифры):",
+            timeout=20,
+        )
+    finally:
+        image_buffer.close()
     captcha_data[chat_id] = {
         "answer": text,
         "attempts": attempts,
         "blocked_until": 0
     }
-    bot.send_photo(chat_id, img_bytes, caption="Введите символы с картинки (заглавные буквы/цифры):")
 
 def check_captcha(user_id, user_text):
     if user_id not in captcha_data:
@@ -257,7 +289,11 @@ def configure_render_webhook():
     try:
         # setWebhook replaces the previous URL atomically. Removing it first
         # creates a delivery gap where Telegram updates can be missed.
-        bot.set_webhook(url=webhook_url, drop_pending_updates=False)
+        bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+            drop_pending_updates=False,
+        )
         logger.info("Telegram webhook configured")
         return True
     except Exception:
@@ -274,6 +310,20 @@ def getMessage():
             logger.warning("Telegram webhook received invalid JSON")
             return "Bad request", 400
         update = telebot.types.Update.de_json(payload)
+        update_type = next(
+            (
+                name
+                for name in (
+                    "message",
+                    "callback_query",
+                    "my_chat_member",
+                    "chat_member",
+                )
+                if getattr(update, name, None) is not None
+            ),
+            "other",
+        )
+        logger.info("Telegram update received type=%s", update_type)
         bot.process_new_updates([update])
     except Exception as exc:
         # Do not include exception text: transport/database exceptions may
@@ -468,6 +518,7 @@ def issue_lesson_once(chat_id, lesson_number):
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
+    logger.info("Telegram /start handler started")
     try:
         storage.ensure_user(user_id)
         inviter_id = parse_referral_payload(message.text)
@@ -487,7 +538,19 @@ def start_handler(message):
         )
 
     captcha_data.pop(user_id, None)
-    send_captcha(user_id, 0)
+    try:
+        send_captcha(user_id, 0)
+    except Exception as exc:
+        log_telegram_error("Telegram captcha delivery failed", exc)
+        try:
+            bot.send_message(
+                user_id,
+                "⚠️ Не удалось отправить капчу. Попробуйте ещё раз через минуту.",
+            )
+        except Exception as fallback_exc:
+            log_telegram_error("Telegram fallback message failed", fallback_exc)
+        return
+    logger.info("Telegram captcha sent")
 
 
 @bot.message_handler(commands=['referral', 'my_referral'])
