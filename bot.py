@@ -65,7 +65,14 @@ TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения")
 
-bot = telebot.TeleBot(TOKEN, exception_handler=SafeBotExceptionHandler())
+# Process webhook updates inside the Gunicorn request. TeleBot's own worker
+# queue can acknowledge an update before its handler has actually run.
+# Gunicorn already provides request-level concurrency for this service.
+bot = telebot.TeleBot(
+    TOKEN,
+    threaded=False,
+    exception_handler=SafeBotExceptionHandler(),
+)
 app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
@@ -325,6 +332,7 @@ def getMessage():
         )
         logger.info("Telegram update received type=%s", update_type)
         bot.process_new_updates([update])
+        logger.info("Telegram update processed type=%s", update_type)
     except Exception as exc:
         # Do not include exception text: transport/database exceptions may
         # contain request URLs or credentials.
