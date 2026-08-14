@@ -1,4 +1,9 @@
-"""Minimal public MEXC Affiliate API client used by the Telegram bot."""
+"""Signed client for the standard MEXC Spot rebate API.
+
+The bot deliberately uses endpoints available to a regular read-only API key.
+Affiliate-only data such as a referral's deposit and aggregate trade volume is
+not fabricated from rebate amounts: those fields are represented as ``None``.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +24,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 MEXC_BASE_URL = "https://api.mexc.com"
-AFFILIATE_REFERRAL_ENDPOINT = "/api/v3/rebate/affiliate/referral"
-AFFILIATE_HISTORY_START_MS = 1609459200000  # 2021-01-01 UTC
-# MEXC rejects affiliate queries whose time range exceeds 30 days.
-AFFILIATE_QUERY_WINDOW_MS = (30 * 24 * 60 * 60 * 1000) - 1
+REBATE_HISTORY_ENDPOINT = "/api/v3/rebate/taxQuery"
+REBATE_DETAIL_ENDPOINT = "/api/v3/rebate/detail"
+MAX_REBATE_PAGES = 500
 
 
 class MexcClientError(Exception):
@@ -65,10 +69,14 @@ class MexcAPIError(MexcClientError):
     kind = "api_error"
 
     _PUBLIC_MESSAGES = {
+        401: "⚠️ MEXC отклонил доступ API-ключа. Администратору нужно проверить права ключа.",
+        602: "⚠️ MEXC отклонил подпись запроса. Администратору нужно проверить API-ключ.",
+        10072: "⚠️ MEXC не принял API-ключ. Администратору нужно проверить ключ.",
+        700001: "⚠️ MEXC не принял формат API-ключа. Администратору нужно проверить ключ.",
         700002: "⚠️ MEXC отклонил подпись запроса. Администратору нужно проверить API-ключ.",
         700003: "⚠️ Время запроса не совпало со временем MEXC. Попробуйте позже.",
         700006: "⚠️ MEXC отклонил исходящий IP-адрес сервиса.",
-        700007: "⚠️ API-ключ MEXC не имеет доступа к Affiliate endpoint.",
+        700007: "⚠️ API-ключ MEXC не имеет доступа к этому методу.",
     }
 
     def __init__(self, api_code: object):
@@ -86,17 +94,18 @@ class MexcAPIError(MexcClientError):
 
 @dataclass(frozen=True)
 class ReferralData:
-    """Only the public Affiliate fields required by current lesson rules."""
+    """Referral data available to a regular MEXC API key."""
 
     uid: str
-    deposit_amount: Decimal
-    trading_amount: Decimal
+    deposit_amount: Optional[Decimal]
+    trading_amount: Optional[Decimal]
     first_trade_time: Optional[int]
     last_trade_time: Optional[int]
+    invite_time: Optional[int] = None
 
 
 class MexcClient:
-    """Signed client for the documented public MEXC Affiliate API."""
+    """Signed client for documented read-only MEXC rebate endpoints."""
 
     def __init__(
         self,
@@ -124,12 +133,7 @@ class MexcClient:
         environ: Optional[Mapping[str, str]] = None,
         **kwargs: object,
     ) -> Optional["MexcClient"]:
-        """Create a client from Render variables, or return None when absent."""
-
         source = os.environ if environ is None else environ
-        # MEXC credentials never contain whitespace. Mobile copy/paste can
-        # insert a line break where the long Secret Key wraps on screen, so
-        # normalize all whitespace before validation and signing.
         api_key = "".join(source.get("MEXC_API_KEY", "").split())
         api_secret = "".join(source.get("MEXC_API_SECRET", "").split())
         if not api_key or not api_secret:
@@ -151,8 +155,6 @@ class MexcClient:
         *,
         timestamp_ms: Optional[int] = None,
     ) -> str:
-        """Build and sign the exact query string that will be sent."""
-
         timestamp = self.clock_ms() if timestamp_ms is None else timestamp_ms
         ordered_params = list(params)
         ordered_params.append(("recvWindow", self.recv_window_ms))
@@ -203,9 +205,10 @@ class MexcClient:
         if not isinstance(payload, MutableMapping):
             raise MexcInvalidResponseError("MEXC response root is not an object")
 
+        api_code = payload.get("code")
+        has_api_code = "code" in payload
         if 400 <= status_code:
-            api_code = payload.get("code")
-            if api_code not in (None, 0, "0"):
+            if has_api_code and api_code not in (None, 0, "0"):
                 logger.warning(
                     "MEXC API rejected request endpoint=%s status=%s code=%s",
                     endpoint,
@@ -216,73 +219,87 @@ class MexcClient:
             logger.warning("MEXC HTTP error endpoint=%s status=%s", endpoint, status_code)
             raise MexcHTTPError(f"MEXC HTTP status {status_code}")
 
-        api_code = payload.get("code")
-        if api_code not in (0, "0"):
+        if payload.get("success") is False or (
+            has_api_code and api_code not in (None, 0, "0")
+        ):
             logger.warning("MEXC API error endpoint=%s code=%s", endpoint, api_code)
             raise MexcAPIError(api_code)
 
         logger.info("MEXC request completed endpoint=%s status=%s", endpoint, status_code)
         return payload
 
-    def get_affiliate_referral(self, uid: str) -> Optional[ReferralData]:
-        """Return a direct affiliate referral by UID, or None when it is absent."""
+    def _get_rebate_page(
+        self,
+        endpoint: str,
+        page: int,
+    ) -> tuple[list[Mapping[str, object]], int]:
+        payload = self._request(endpoint, (("page", page),))
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise MexcInvalidResponseError("MEXC response has no rebate data list")
 
-        window_end_ms = self.clock_ms()
-        while window_end_ms >= AFFILIATE_HISTORY_START_MS:
-            window_start_ms = max(
-                AFFILIATE_HISTORY_START_MS,
-                window_end_ms - AFFILIATE_QUERY_WINDOW_MS,
-            )
-            request_timestamp_ms = self.clock_ms()
-            payload = self._request(
-                AFFILIATE_REFERRAL_ENDPOINT,
-                (
-                    ("uid", uid),
-                    ("startTime", window_start_ms),
-                    ("endTime", window_end_ms),
-                    ("page", 1),
-                    ("pageSize", 10),
-                ),
-                timestamp_ms=request_timestamp_ms,
-            )
+        try:
+            total_pages = int(payload.get("totalPageNum", 1))
+        except (TypeError, ValueError) as exc:
+            raise MexcInvalidResponseError("MEXC totalPageNum is invalid") from exc
+        # Some API implementations use zero pages for an empty result set.
+        # Treat that as one empty terminal page instead of a malformed answer.
+        if total_pages == 0 and not data:
+            total_pages = 1
+        if total_pages < 1 or total_pages > MAX_REBATE_PAGES:
+            raise MexcInvalidResponseError("MEXC totalPageNum is outside the safe limit")
 
-            data = payload.get("data")
-            if not isinstance(data, Mapping):
-                raise MexcInvalidResponseError("MEXC response has no data object")
-            result_list = data.get("resultList")
-            if not isinstance(result_list, list):
-                raise MexcInvalidResponseError("MEXC response has no resultList")
+        records = [record for record in data if isinstance(record, Mapping)]
+        if len(records) != len(data):
+            raise MexcInvalidResponseError("MEXC rebate record is invalid")
+        return records, total_pages
 
-            referral = next(
-                (
-                    item
-                    for item in result_list
-                    if isinstance(item, Mapping) and str(item.get("uid", "")) == uid
-                ),
-                None,
-            )
-            if referral is not None:
-                return ReferralData(
-                    uid=uid,
-                    deposit_amount=self._parse_decimal(
-                        referral.get("depositAmount"), "depositAmount"
-                    ),
-                    trading_amount=self._parse_decimal(
-                        referral.get("tradingAmount"), "tradingAmount"
-                    ),
-                    first_trade_time=self._parse_optional_timestamp(
-                        referral.get("firstTradeTime", referral.get("firstTrade")),
-                        "firstTradeTime",
-                    ),
-                    last_trade_time=self._parse_optional_timestamp(
-                        referral.get("lastTradeTime", referral.get("lastTrade")),
-                        "lastTradeTime",
-                    ),
+    def _iter_rebate_records(self, endpoint: str) -> Iterable[Mapping[str, object]]:
+        page = 1
+        while True:
+            records, total_pages = self._get_rebate_page(endpoint, page)
+            yield from records
+            if page >= total_pages:
+                return
+            page += 1
+
+    def get_rebate_referral(self, uid: str) -> Optional[ReferralData]:
+        """Find a referred UID and rebate-generating trades visible to this key."""
+
+        normalized_uid = str(uid).strip()
+        if not normalized_uid.isdigit():
+            raise ValueError("uid must contain digits only")
+
+        referral_found = False
+        invite_time: Optional[int] = None
+        for record in self._iter_rebate_records(REBATE_HISTORY_ENDPOINT):
+            if str(record.get("uid", "")) == normalized_uid:
+                referral_found = True
+                invite_time = self._parse_optional_timestamp(
+                    record.get("inviteTime"), "inviteTime"
                 )
+                break
 
-            window_end_ms = window_start_ms - 1
+        if not referral_found:
+            return None
 
-        return None
+        trade_times = []
+        for record in self._iter_rebate_records(REBATE_DETAIL_ENDPOINT):
+            if str(record.get("uid", "")) == normalized_uid:
+                trade_time = self._parse_optional_timestamp(
+                    record.get("tradeTime"), "tradeTime"
+                )
+                if trade_time is not None:
+                    trade_times.append(trade_time)
+
+        return ReferralData(
+            uid=normalized_uid,
+            deposit_amount=None,
+            trading_amount=None,
+            first_trade_time=min(trade_times) if trade_times else None,
+            last_trade_time=max(trade_times) if trade_times else None,
+            invite_time=invite_time,
+        )
 
     @staticmethod
     def _parse_decimal(value: object, field_name: str) -> Decimal:
@@ -305,8 +322,6 @@ class MexcClient:
             raise MexcInvalidResponseError(f"MEXC field {field_name} is invalid")
         if timestamp == 0:
             return None
-        # Official examples use milliseconds, but normalizing a seconds value
-        # makes comparison safe if an older account is returned in that form.
         if 0 < timestamp < 100_000_000_000:
             timestamp *= 1000
         return timestamp

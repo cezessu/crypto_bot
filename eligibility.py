@@ -43,30 +43,26 @@ def _format_decimal(value: Decimal) -> str:
 
 
 def _lesson2(referral: ReferralData) -> EligibilityResult:
-    deposit_ok = referral.deposit_amount >= Decimal("100")
-    first_trade_ok = referral.first_trade_time is not None
-    if deposit_ok and first_trade_ok:
+    if referral.first_trade_time is not None:
         return EligibilityResult(
             EligibilityStatus.ELIGIBLE,
-            f"✅ Условие выполнено: депозит {_format_decimal(referral.deposit_amount)} USDT, "
-            "первая сделка подтверждена.",
+            "✅ Условие выполнено: UID найден в реферальной истории MEXC, "
+            "сделка с начислением комиссии подтверждена.",
         )
-
-    missing = []
-    if not deposit_ok:
-        missing.append(
-            f"пополнить счёт минимум до 100 USDT "
-            f"(сейчас {_format_decimal(referral.deposit_amount)} USDT)"
-        )
-    if not first_trade_ok:
-        missing.append("совершить первую сделку")
     return EligibilityResult(
         EligibilityStatus.INELIGIBLE,
-        "❌ Условие пока не выполнено: " + " и ".join(missing) + ".",
+        "❌ UID найден, но MEXC пока не показывает сделку с начислением комиссии. "
+        "Совершите сделку и повторите проверку немного позже.",
     )
 
 
 def _volume(referral: ReferralData, threshold: Decimal, lesson_number: int) -> EligibilityResult:
+    if referral.trading_amount is None:
+        return EligibilityResult(
+            EligibilityStatus.INELIGIBLE,
+            f"⚠️ Методичка №{lesson_number}: текущий API MEXC не отдаёт торговый "
+            "объём. Для проверки этого условия обратитесь к администратору.",
+        )
     if referral.trading_amount >= threshold:
         return EligibilityResult(
             EligibilityStatus.ELIGIBLE,

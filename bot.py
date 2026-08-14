@@ -110,7 +110,7 @@ except MexcConfigurationError:
 if mexc is None:
     logger.warning("MEXC credentials are not configured; verifiable lessons are disabled")
 else:
-    logger.info("MEXC client initialized")
+    logger.info("MEXC client configured; access will be checked on the first request")
 
 MEXC_CACHE_TTL_SECONDS = 30
 MEXC_CACHE_MAX_ENTRIES = 256
@@ -176,7 +176,7 @@ def get_referral_cached(uid, *, force_refresh=False):
         for key in expired_keys:
             _mexc_cache.pop(key, None)
 
-    referral = mexc.get_affiliate_referral(uid)
+    referral = mexc.get_rebate_referral(uid)
 
     with _mexc_cache_lock:
         if len(_mexc_cache) >= MEXC_CACHE_MAX_ENTRIES:
@@ -368,10 +368,10 @@ def get_after_lesson_text(lesson_number):
             "Теперь у тебя есть база. Дальше — реальный трейдинг.\n\n"
             "Следующая методичка:\n\n"
             "📘 Методичка №2 — Уровни, Фибоначчи, OI, EMA, RSI\n"
-            "✅ Условие: Пополнить MEXC от 100 USDT и совершить первую сделку\n\n"
+            "✅ Условие: Зарегистрироваться по реферальной ссылке и совершить сделку\n\n"
             "---\n\n"
             "Как получить следующую методичку (№2):\n\n"
-            "1. Пополни MEXC от 100 USDT и соверши первую сделку\n"
+            "1. Зарегистрируйся по реферальной ссылке и соверши первую сделку\n"
             "2. Нажми кнопку «📘 Методичка №2» в меню внизу\n"
             "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
             "4. Введи UID — и получишь второй урок!\n"
@@ -389,9 +389,10 @@ def get_after_lesson_text(lesson_number):
             "Как получить следующую методичку (№3):\n\n"
             "1. Продолжай торговать, пока общий объём не достигнет 300 USDT\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт объём 300 USDT. Всего одна такая сделка — и условие выполнено!)\n"
-            "2. Нажми кнопку «📘 Методичка №3» в меню внизу\n"
-            "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
-            "4. Введи UID — и получишь третий урок!\n\n"
+            "2. Нажми кнопку «📘 Методичка №3» и введи свой UID\n"
+            "3. Бот проверит реферальную привязку, а торговый объём подтверди "
+            "у администратора\n"
+            "4. После ручной проверки администратор выдаст третий урок\n\n"
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 3:
@@ -399,8 +400,7 @@ def get_after_lesson_text(lesson_number):
             "Красава! Ты освоил Price Action!\n\n"
             "📘 Методичка №4 выдаётся за 1 квалифицированного приглашённого.\n\n"
             "Нажми «👥 Моя ссылка и друзья» в меню внизу.\n"
-            "Друг должен перейти по ней, привязать свой MEXC UID, пополнить счёт "
-            "минимум на 100 USDT и совершить первую сделку.\n"
+            "Друг должен перейти по ней, привязать свой MEXC UID и совершить сделку.\n"
             "После этого нажми «📘 Методичка №4».\n\n"
             "Удачи на пути к профи! 🚀"
         )
@@ -436,7 +436,7 @@ def get_after_lesson_text(lesson_number):
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт 300 USDT. Для 5 000 USDT нужно около 17 таких сделок. Реально за пару недель!)\n"
             "(Свою персональную Telegram-ссылку можно получить кнопкой «👥 Моя ссылка и друзья»)\n"
             "2. Нажми кнопку «📘 Методичка №7»\n"
-            "3. Если трёх приглашённых ещё нет, бот проверит привязанный MEXC UID.\n\n"
+            "3. Ветку с тремя приглашёнными бот проверяет автоматически; объём — через администратора.\n\n"
             "Это финиш! Ты почти у цели! 🚀"
         )
     elif lesson_number == 7:
@@ -585,8 +585,8 @@ def referral_handler(message):
         "Ваша персональная ссылка:\n"
         f"{referral_link}\n\n"
         f"Квалифицированных приглашённых: {qualified_count}\n\n"
-        "Приглашённый засчитывается после привязки своего MEXC UID, "
-        "депозита от 100 USDT и первой сделки."
+        "Приглашённый засчитывается после привязки своего MEXC UID "
+        "и сделки, по которой MEXC начислил комиссию."
     )
 
 
@@ -791,7 +791,8 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
     if referral is None:
         bot.send_message(
             user_id,
-            "❌ UID не найден среди прямых рефералов этого MEXC Affiliate-аккаунта."
+            "❌ UID не найден в истории рефералов MEXC. Проверьте, что регистрация "
+            "была по вашей ссылке, и повторите после первой сделки."
         )
         return
 
@@ -824,10 +825,7 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
                     referral.last_trade_time or referral.first_trade_time
                 ),
             )
-        if (
-            referral.deposit_amount >= 100
-            and referral.first_trade_time is not None
-        ):
+        if referral.first_trade_time is not None:
             storage.mark_qualified(user_id)
 
         user_state = storage.get_user(user_id)
