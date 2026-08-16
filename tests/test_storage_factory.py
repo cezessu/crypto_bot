@@ -83,6 +83,43 @@ class StorageFactoryTests(unittest.TestCase):
         schema = "\n".join(statement for statement, _ in connection.statements)
         self.assertIn("CREATE TABLE IF NOT EXISTS bot_users", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS bot_issued_lessons", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS bot_lesson_delivery_claims", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS bot_lesson_delivery_parts", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS bot_lesson_review_requests", schema)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS bot_lesson_review_notification_claims",
+            schema,
+        )
+        self.assertIn("lesson_number IN (3, 7)", schema)
+        self.assertIn("idx_bot_lesson_review_requests_active", schema)
+        self.assertIn(
+            "ALTER TABLE bot_users ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "ALTER TABLE bot_issued_lessons ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "ALTER TABLE bot_lesson_delivery_claims ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "ALTER TABLE bot_lesson_delivery_parts ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "ALTER TABLE bot_lesson_review_requests ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "ALTER TABLE bot_lesson_review_notification_claims ENABLE ROW LEVEL SECURITY",
+            schema,
+        )
+        self.assertIn(
+            "REVOKE ALL ON TABLE bot_users FROM anon, authenticated",
+            schema,
+        )
 
     def test_invalid_supabase_url_is_rejected(self):
         with self.assertRaises(StorageError):
@@ -112,9 +149,28 @@ class StorageFactoryTests(unittest.TestCase):
             "mark_qualified",
             "count_qualified_invites",
             "claim_lesson",
+            "claim_lesson_delivery",
+            "renew_lesson_delivery",
+            "complete_lesson_delivery",
+            "release_lesson_delivery",
             "release_lesson",
+            "is_lesson_part_delivered",
+            "mark_lesson_part_delivered",
+            "mark_claimed_lesson_part_delivered",
             "is_lesson_issued",
+            "is_lesson_delivery_in_progress",
             "issued_lessons",
+            "request_lesson_review",
+            "get_lesson_review_request",
+            "mark_lesson_review_notified",
+            "mark_lesson_review_user_notified",
+            "claim_lesson_review_notification",
+            "complete_lesson_review_notification",
+            "release_lesson_review_notification",
+            "decide_lesson_review_request",
+            "claim_lesson_review_delivery",
+            "release_lesson_review_delivery",
+            "mark_lesson_review_fulfilled",
         }
         for method_name in required_methods:
             with self.subTest(method=method_name):

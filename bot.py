@@ -3,9 +3,12 @@ import io
 import time
 import random
 import logging
+import re
+import secrets
 import sqlite3
 import threading
 import hashlib
+from pathlib import Path
 import telebot
 from telebot import types
 from flask import Flask, request
@@ -21,6 +24,10 @@ from eligibility import (
 from mexc_client import MexcClient, MexcClientError, MexcConfigurationError
 from referrals import build_referral_link, parse_referral_payload
 from storage import (
+    LessonAlreadyIssuedError,
+    LessonDeliveryInProgressError,
+    LessonDeliveryClaimStatus,
+    LessonReviewStatus,
     MexcUidAlreadyBoundError,
     ReferralAssignment,
     StorageError,
@@ -35,6 +42,7 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(name)s %(message)s'
 )
 logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parent
 
 
 def log_telegram_error(context, exception):
@@ -77,6 +85,43 @@ app = Flask(__name__)
 
 # --- НАСТРОЙКИ ---
 CHANNEL_USERNAME = "tradegrowthh"
+DEFAULT_ADMIN_TELEGRAM_ID = 7629218005
+MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807
+LESSON_DELIVERY_LEASE_MS = 10 * 60 * 1000
+LESSON_REVIEW_NOTIFICATION_LEASE_MS = 2 * 60 * 1000
+REVIEW_DELIVERY_DELIVERED = "delivered"
+REVIEW_DELIVERY_BUSY = "busy"
+REVIEW_DELIVERY_FAILED = "failed"
+
+
+def load_admin_telegram_ids():
+    raw_ids = os.environ.get("ADMIN_TELEGRAM_IDS")
+    if raw_ids is None:
+        raw_ids = os.environ.get("ADMIN_TELEGRAM_ID")
+    if raw_ids is None:
+        return frozenset({DEFAULT_ADMIN_TELEGRAM_ID})
+
+    try:
+        parsed = frozenset(
+            int(value.strip())
+            for value in raw_ids.split(",")
+            if value.strip()
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "ADMIN_TELEGRAM_IDS contains a non-numeric Telegram ID"
+        ) from exc
+    if not parsed or any(
+        admin_id <= 0 or admin_id > MAX_POSTGRES_BIGINT for admin_id in parsed
+    ):
+        raise ValueError(
+            "ADMIN_TELEGRAM_IDS must contain positive signed 64-bit Telegram IDs"
+        )
+    return parsed
+
+
+ADMIN_TELEGRAM_IDS = load_admin_telegram_ids()
+MANUAL_REVIEW_CALLBACK = re.compile(r"^mr:([ar]):([1-9][0-9]{0,18})$")
 # Never put BOT_TOKEN into a public URL: Flask/Render access logs include the
 # request path.  The path remains stable for this bot but cannot be reversed
 # to obtain the Telegram token.
@@ -462,7 +507,41 @@ def is_subscribed(user_id):
         return False
 
 # --- ОТПРАВКА МЕТОДИЧКИ ---
-def send_lesson(chat_id, lesson_number):
+def send_lesson_part(
+    chat_id,
+    lesson_number,
+    part,
+    file_name,
+    caption,
+    delivery_token,
+):
+    if storage.is_lesson_part_delivered(chat_id, lesson_number, part):
+        return True
+
+    if not storage.renew_lesson_delivery(
+        chat_id,
+        lesson_number,
+        delivery_token,
+        LESSON_DELIVERY_LEASE_MS,
+    ):
+        return False
+
+    try:
+        with (BASE_DIR / file_name).open('rb') as file_object:
+            bot.send_document(chat_id, file_object, caption=caption, timeout=120)
+    except FileNotFoundError:
+        bot.send_message(chat_id, f"❌ Файл {file_name} не найден.")
+        return False
+
+    return storage.mark_claimed_lesson_part_delivered(
+        chat_id,
+        lesson_number,
+        part,
+        delivery_token,
+    )
+
+
+def send_lesson(chat_id, lesson_number, delivery_token):
     files = LESSON_FILES.get(lesson_number)
     if not files:
         bot.send_message(chat_id, "❌ Методичка не найдена.")
@@ -471,44 +550,73 @@ def send_lesson(chat_id, lesson_number):
     main_file = files.get("main")
     bonus_file = files.get("bonus")
 
-    try:
-        with open(main_file, 'rb') as f:
-            bot.send_document(chat_id, f, caption=f"📘 Методичка №{lesson_number}")
-    except FileNotFoundError:
-        bot.send_message(chat_id, f"❌ Файл {main_file} не найден.")
+    if not send_lesson_part(
+        chat_id,
+        lesson_number,
+        "main",
+        main_file,
+        f"📘 Методичка №{lesson_number}",
+        delivery_token,
+    ):
         return False
 
-    if bonus_file:
-        try:
-            with open(bonus_file, 'rb') as f:
-                bot.send_document(chat_id, f, caption="🎁 Бонус! Дополнительный материал к уроку.")
-        except FileNotFoundError:
-            bot.send_message(chat_id, "⚠️ Бонусный файл не найден.")
+    if bonus_file and not send_lesson_part(
+        chat_id,
+        lesson_number,
+        "bonus",
+        bonus_file,
+        "🎁 Бонус! Дополнительный материал к уроку.",
+        delivery_token,
+    ):
+        return False
 
     after_text = get_after_lesson_text(lesson_number)
     if after_text:
-        bot.send_message(chat_id, after_text, reply_markup=build_main_menu())
+        try:
+            bot.send_message(
+                chat_id,
+                after_text,
+                reply_markup=build_main_menu(),
+                timeout=30,
+            )
+        except Exception as exc:
+            # Both PDFs are checkpointed already. A transient failure of the
+            # follow-up text must not cause them to be sent again.
+            log_telegram_error("Post-lesson guidance delivery failed", exc)
     return True
 
 
 def issue_lesson_once(chat_id, lesson_number):
     """Atomically prevent repeated delivery of lessons 1-7."""
+    delivery_token = secrets.token_urlsafe(24)
     try:
-        claimed = storage.claim_lesson(chat_id, lesson_number)
+        claim_status = storage.claim_lesson_delivery(
+            chat_id,
+            lesson_number,
+            delivery_token,
+            LESSON_DELIVERY_LEASE_MS,
+        )
     except (StorageError, sqlite3.Error):
         logger.error("Lesson delivery state is unavailable lesson=%s", lesson_number)
         bot.send_message(chat_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
         return False
 
-    if not claimed:
+    if claim_status is LessonDeliveryClaimStatus.ALREADY_ISSUED:
         bot.send_message(chat_id, f"ℹ️ Методичка №{lesson_number} уже была вам выдана.")
+        return False
+    if claim_status is LessonDeliveryClaimStatus.BUSY:
+        bot.send_message(chat_id, "⏳ Методичка уже отправляется. Дождитесь завершения.")
         return False
 
     try:
-        delivered = send_lesson(chat_id, lesson_number)
+        delivered = send_lesson(chat_id, lesson_number, delivery_token)
     except Exception:
         try:
-            storage.release_lesson(chat_id, lesson_number)
+            storage.release_lesson_delivery(
+                chat_id,
+                lesson_number,
+                delivery_token,
+            )
         except (StorageError, sqlite3.Error):
             logger.error("Failed to release lesson delivery claim lesson=%s", lesson_number)
         logger.error("Telegram lesson delivery failed lesson=%s", lesson_number)
@@ -517,10 +625,360 @@ def issue_lesson_once(chat_id, lesson_number):
 
     if not delivered:
         try:
-            storage.release_lesson(chat_id, lesson_number)
+            storage.release_lesson_delivery(
+                chat_id,
+                lesson_number,
+                delivery_token,
+            )
         except (StorageError, sqlite3.Error):
             logger.error("Failed to release lesson delivery claim lesson=%s", lesson_number)
+        return False
+
+    try:
+        completed = storage.complete_lesson_delivery(
+            chat_id,
+            lesson_number,
+            delivery_token,
+        )
+    except (StorageError, sqlite3.Error):
+        completed = False
+        logger.error("Lesson delivery completion could not be persisted lesson=%s", lesson_number)
+    if not completed:
+        try:
+            storage.release_lesson_delivery(
+                chat_id,
+                lesson_number,
+                delivery_token,
+            )
+        except (StorageError, sqlite3.Error):
+            logger.error("Failed to release incomplete lesson delivery lesson=%s", lesson_number)
+        bot.send_message(
+            chat_id,
+            "⚠️ Файлы отправлены, но состояние не сохранилось. "
+            "Повторите проверку позже.",
+        )
+        return False
+    return True
+
+
+def build_lesson_review_markup(request_id, *, retry_only=False):
+    markup = types.InlineKeyboardMarkup()
+    approve_text = "🔁 Повторить отправку" if retry_only else "✅ Выдать"
+    markup.add(
+        types.InlineKeyboardButton(
+            approve_text,
+            callback_data=f"mr:a:{request_id}",
+        )
+    )
+    if not retry_only:
+        markup.add(
+            types.InlineKeyboardButton(
+                "❌ Отказать",
+                callback_data=f"mr:r:{request_id}",
+            )
+        )
+    return markup
+
+
+def build_rejection_notification_retry_markup(request_id):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton(
+            "🔁 Повторить уведомление",
+            callback_data=f"mr:r:{request_id}",
+        )
+    )
+    return markup
+
+
+def notify_admins_of_lesson_review(review):
+    threshold = 300 if review.lesson_number == 3 else 5000
+    text = (
+        f"🔎 Заявка №{review.request_id} на методичку "
+        f"№{review.lesson_number}\n\n"
+        f"Telegram ID: {review.telegram_id}\n"
+        f"MEXC UID: {review.mexc_uid}\n"
+        f"Нужно подтвердить объём от {threshold} USDT."
+    )
+    delivered = 0
+    for admin_id in ADMIN_TELEGRAM_IDS:
+        try:
+            bot.send_message(
+                admin_id,
+                text,
+                reply_markup=build_lesson_review_markup(review.request_id),
+            )
+            delivered += 1
+        except Exception as exc:
+            log_telegram_error("Manual review notification failed", exc)
     return delivered
+
+
+def release_review_notification(request_id, recipient, notification_token):
+    try:
+        storage.release_lesson_review_notification(
+            request_id,
+            recipient,
+            notification_token,
+        )
+    except (StorageError, sqlite3.Error):
+        logger.error(
+            "Manual review notification claim could not be released recipient=%s",
+            recipient,
+        )
+
+
+def mark_review_fulfilled(review, delivery_token):
+    try:
+        return storage.mark_lesson_review_fulfilled(
+            review.request_id,
+            delivery_token,
+        )
+    except (StorageError, sqlite3.Error):
+        # The PDF has already been delivered. A repeated approve will reconcile
+        # this state from issued_lessons without sending the files twice.
+        logger.error(
+            "Manual review fulfillment could not be persisted lesson=%s",
+            review.lesson_number,
+        )
+        return False
+
+
+def deliver_approved_lesson_review(review):
+    delivery_token = secrets.token_urlsafe(24)
+    try:
+        claimed = storage.claim_lesson_review_delivery(
+            review.request_id,
+            delivery_token,
+            LESSON_DELIVERY_LEASE_MS,
+        )
+    except (StorageError, sqlite3.Error):
+        logger.error(
+            "Manual review delivery claim is unavailable lesson=%s",
+            review.lesson_number,
+        )
+        return REVIEW_DELIVERY_FAILED
+
+    if not claimed:
+        try:
+            current = storage.get_lesson_review_request(review.request_id)
+        except (StorageError, sqlite3.Error):
+            return REVIEW_DELIVERY_FAILED
+        if current and current.status is LessonReviewStatus.FULFILLED:
+            return REVIEW_DELIVERY_DELIVERED
+        return REVIEW_DELIVERY_BUSY
+
+    fulfilled = False
+    try:
+        try:
+            already_issued = storage.is_lesson_issued(
+                review.telegram_id,
+                review.lesson_number,
+            )
+        except (StorageError, sqlite3.Error):
+            return REVIEW_DELIVERY_FAILED
+
+        delivered = already_issued or issue_lesson_once(
+            review.telegram_id,
+            review.lesson_number,
+        )
+        if not delivered:
+            try:
+                current = storage.get_lesson_review_request(review.request_id)
+                if current and current.status is LessonReviewStatus.FULFILLED:
+                    fulfilled = True
+                    return REVIEW_DELIVERY_DELIVERED
+                delivery_busy = storage.is_lesson_delivery_in_progress(
+                    review.telegram_id,
+                    review.lesson_number,
+                )
+                if delivery_busy:
+                    return REVIEW_DELIVERY_BUSY
+                current = storage.get_lesson_review_request(review.request_id)
+                if current and current.status is LessonReviewStatus.FULFILLED:
+                    fulfilled = True
+                    return REVIEW_DELIVERY_DELIVERED
+            except (StorageError, sqlite3.Error):
+                return REVIEW_DELIVERY_FAILED
+            return REVIEW_DELIVERY_FAILED
+
+        try:
+            current = storage.get_lesson_review_request(review.request_id)
+        except (StorageError, sqlite3.Error):
+            current = None
+        fulfilled = (
+            current is not None
+            and current.status is LessonReviewStatus.FULFILLED
+        )
+        if not fulfilled:
+            fulfilled = mark_review_fulfilled(review, delivery_token)
+        return (
+            REVIEW_DELIVERY_DELIVERED
+            if fulfilled
+            else REVIEW_DELIVERY_FAILED
+        )
+    finally:
+        if not fulfilled:
+            try:
+                storage.release_lesson_review_delivery(
+                    review.request_id,
+                    delivery_token,
+                )
+            except (StorageError, sqlite3.Error):
+                logger.error(
+                    "Manual review delivery claim could not be released lesson=%s",
+                    review.lesson_number,
+                )
+
+
+def submit_lesson_review(user_id, lesson_number):
+    try:
+        submission = storage.request_lesson_review(user_id, lesson_number)
+    except LessonAlreadyIssuedError:
+        bot.send_message(user_id, f"ℹ️ Методичка №{lesson_number} уже была вам выдана.")
+        return True
+    except LessonDeliveryInProgressError:
+        bot.send_message(
+            user_id,
+            f"⏳ Методичка №{lesson_number} уже отправляется. "
+            "Дождитесь завершения.",
+        )
+        return True
+    except (StorageError, sqlite3.Error):
+        logger.error("Manual lesson review could not be persisted lesson=%s", lesson_number)
+        bot.send_message(user_id, "⚠️ Не удалось создать заявку. Попробуйте позже.")
+        return False
+
+    review = submission.request
+    if review.status is LessonReviewStatus.APPROVED:
+        bot.send_message(
+            user_id,
+            f"✅ Заявка №{review.request_id} уже одобрена. "
+            "Повторяю отправку методички.",
+        )
+        delivery = deliver_approved_lesson_review(review)
+        if delivery == REVIEW_DELIVERY_BUSY:
+            bot.send_message(user_id, "⏳ Отправка уже выполняется.")
+        return delivery != REVIEW_DELIVERY_FAILED
+
+    if review.admin_notified_at is None:
+        notification_token = secrets.token_urlsafe(24)
+        try:
+            notification_claimed = storage.claim_lesson_review_notification(
+                review.request_id,
+                "admin",
+                notification_token,
+                LESSON_REVIEW_NOTIFICATION_LEASE_MS,
+            )
+        except (StorageError, sqlite3.Error):
+            logger.error(
+                "Manual review notification claim is unavailable lesson=%s",
+                lesson_number,
+            )
+            bot.send_message(user_id, "⚠️ Не удалось уведомить администратора. Попробуйте позже.")
+            return False
+
+        if notification_claimed:
+            notification_completed = False
+            try:
+                notified_count = notify_admins_of_lesson_review(review)
+                if notified_count:
+                    notification_completed = (
+                        storage.complete_lesson_review_notification(
+                            review.request_id,
+                            "admin",
+                            notification_token,
+                        )
+                    )
+            except (StorageError, sqlite3.Error):
+                logger.error(
+                    "Manual review notification state could not be persisted lesson=%s",
+                    lesson_number,
+                )
+            finally:
+                if not notification_completed:
+                    release_review_notification(
+                        review.request_id,
+                        "admin",
+                        notification_token,
+                    )
+
+            if not notification_completed:
+                bot.send_message(
+                    user_id,
+                    f"⚠️ Заявка №{review.request_id} сохранена, но администратора "
+                    "не удалось надёжно уведомить. Нажмите кнопку методички ещё раз.",
+                )
+                return False
+        else:
+            try:
+                current = storage.get_lesson_review_request(review.request_id)
+            except (StorageError, sqlite3.Error):
+                current = None
+            if current is None:
+                bot.send_message(user_id, "⚠️ Не удалось проверить статус заявки.")
+                return False
+            if current.status is LessonReviewStatus.FULFILLED:
+                bot.send_message(
+                    user_id,
+                    f"ℹ️ Методичка №{lesson_number} уже была вам выдана.",
+                )
+                return True
+            if current.status is LessonReviewStatus.REJECTED:
+                bot.send_message(
+                    user_id,
+                    f"❌ Заявка №{current.request_id} уже отклонена. "
+                    "После выполнения условия подайте новую.",
+                )
+                return False
+            if current.status is LessonReviewStatus.APPROVED:
+                bot.send_message(
+                    user_id,
+                    f"✅ Заявка №{current.request_id} уже одобрена; "
+                    "методичка готовится к отправке.",
+                )
+                return True
+            if current.admin_notified_at is None:
+                bot.send_message(
+                    user_id,
+                    f"⏳ Заявка №{review.request_id} сохранена; "
+                    "уведомление администратору уже отправляется.",
+                )
+                return True
+
+    if submission.created:
+        bot.send_message(
+            user_id,
+            f"✅ Заявка №{review.request_id} на методичку №{lesson_number} "
+            "отправлена администратору. После проверки бот сам пришлёт PDF.",
+        )
+    else:
+        bot.send_message(
+            user_id,
+            f"⏳ Заявка №{review.request_id} уже ожидает проверки администратором.",
+        )
+    return True
+
+
+def answer_review_callback(call, text, *, show_alert=False):
+    try:
+        bot.answer_callback_query(call.id, text, show_alert=show_alert)
+    except Exception as exc:
+        log_telegram_error("Manual review callback answer failed", exc)
+
+
+def edit_review_message(call, text, *, reply_markup=None):
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except Exception as exc:
+        # The database decision and user delivery must not depend on whether
+        # Telegram still allows the old admin message to be edited.
+        log_telegram_error("Manual review admin message edit failed", exc)
 
 # --- ОБРАБОТЧИКИ ---
 @bot.message_handler(commands=['start'])
@@ -641,6 +1099,265 @@ def handle_check_sub(call):
         )
     else:
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
+
+
+@bot.callback_query_handler(
+    func=lambda call: (getattr(call, 'data', '') or '').startswith('mr:')
+)
+def handle_lesson_review_callback(call):
+    match = MANUAL_REVIEW_CALLBACK.fullmatch(getattr(call, 'data', '') or '')
+    if match is None:
+        answer_review_callback(call, "❌ Неверная кнопка.", show_alert=True)
+        return
+
+    request_id = int(match.group(2))
+    if request_id > MAX_POSTGRES_BIGINT:
+        answer_review_callback(call, "❌ Неверный номер заявки.", show_alert=True)
+        return
+
+    admin_id = getattr(getattr(call, 'from_user', None), 'id', None)
+    admin_chat_id = getattr(
+        getattr(getattr(call, 'message', None), 'chat', None),
+        'id',
+        None,
+    )
+    if admin_id not in ADMIN_TELEGRAM_IDS or admin_chat_id != admin_id:
+        answer_review_callback(call, "❌ Нет прав на это действие.", show_alert=True)
+        return
+
+    requested_status = (
+        LessonReviewStatus.APPROVED
+        if match.group(1) == 'a'
+        else LessonReviewStatus.REJECTED
+    )
+    rejection_notification_token = (
+        secrets.token_urlsafe(24)
+        if requested_status is LessonReviewStatus.REJECTED
+        else None
+    )
+    try:
+        decision = storage.decide_lesson_review_request(
+            request_id,
+            requested_status,
+            admin_id,
+            notification_token=rejection_notification_token,
+            notification_lease_ms=(
+                LESSON_REVIEW_NOTIFICATION_LEASE_MS
+                if rejection_notification_token is not None
+                else 0
+            ),
+        )
+    except (StorageError, sqlite3.Error):
+        logger.error("Manual review decision could not be persisted")
+        answer_review_callback(
+            call,
+            "⚠️ Хранилище недоступно. Попробуйте позже.",
+            show_alert=True,
+        )
+        return
+
+    review = decision.request
+    if review is None:
+        answer_review_callback(call, "❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if decision.delivery_in_progress:
+        answer_review_callback(
+            call,
+            "⏳ Отправка методички уже выполняется автоматически. "
+            "Повторите позже.",
+            show_alert=True,
+        )
+        return
+
+    if decision.lesson_already_issued:
+        edit_review_message(
+            call,
+            f"ℹ️ Заявка №{review.request_id} была отклонена, но методичка "
+            f"№{review.lesson_number} позже выдана автоматически.",
+        )
+        answer_review_callback(
+            call,
+            "Методичка уже выдана; уведомление об отказе не отправлено.",
+            show_alert=True,
+        )
+        return
+
+    if review.status is LessonReviewStatus.FULFILLED:
+        if requested_status is LessonReviewStatus.APPROVED:
+            edit_review_message(
+                call,
+                f"✅ Заявка №{review.request_id}: методичка "
+                f"№{review.lesson_number} уже выдана.",
+            )
+            answer_review_callback(call, "Уже выдана.")
+        else:
+            edit_review_message(
+                call,
+                f"✅ Заявка №{review.request_id}: методичка "
+                f"№{review.lesson_number} уже выдана.",
+            )
+            answer_review_callback(
+                call,
+                "❌ Методичка уже выдана; отказать нельзя.",
+                show_alert=True,
+            )
+        return
+
+    if review.status is not requested_status:
+        if review.status is LessonReviewStatus.APPROVED:
+            edit_review_message(
+                call,
+                f"✅ Заявка №{review.request_id} уже одобрена.\n"
+                f"Методичка №{review.lesson_number} ожидает отправки или уже "
+                "отправляется.",
+                reply_markup=build_lesson_review_markup(
+                    review.request_id,
+                    retry_only=True,
+                ),
+            )
+        elif review.status is LessonReviewStatus.REJECTED:
+            user_notified = review.user_notified_at is not None
+            edit_review_message(
+                call,
+                f"❌ Заявка №{review.request_id} уже отклонена.\n"
+                f"Telegram ID: {review.telegram_id}\nMEXC UID: {review.mexc_uid}"
+                + (
+                    ""
+                    if user_notified
+                    else "\n\n⚠️ Пользователь пока не уведомлён."
+                ),
+                reply_markup=(
+                    None
+                    if user_notified
+                    else build_rejection_notification_retry_markup(
+                        review.request_id
+                    )
+                ),
+            )
+        answer_review_callback(
+            call,
+            "❌ По этой заявке уже принято другое решение.",
+            show_alert=True,
+        )
+        return
+
+    if requested_status is LessonReviewStatus.REJECTED:
+        notification_result = "already" if review.user_notified_at is not None else "busy"
+        notification_token = rejection_notification_token
+        if review.user_notified_at is None:
+            claimed = decision.notification_claimed
+
+            if claimed:
+                notification_result = "failed"
+                notification_completed = False
+                try:
+                    bot.send_message(
+                        review.telegram_id,
+                        f"❌ Заявка №{review.request_id} на методичку "
+                        f"№{review.lesson_number} не прошла проверку. "
+                        "После выполнения условия можно подать новую заявку.",
+                    )
+                    notification_completed = (
+                        storage.complete_lesson_review_notification(
+                            review.request_id,
+                            "user",
+                            notification_token,
+                        )
+                    )
+                    notification_result = (
+                        "sent" if notification_completed else "failed"
+                    )
+                except (StorageError, sqlite3.Error):
+                    logger.error("Manual review rejection notice state was not persisted")
+                except Exception as exc:
+                    log_telegram_error("Manual review rejection notice failed", exc)
+                finally:
+                    if not notification_completed:
+                        release_review_notification(
+                            review.request_id,
+                            "user",
+                            notification_token,
+                        )
+
+        try:
+            current = storage.get_lesson_review_request(review.request_id)
+        except (StorageError, sqlite3.Error):
+            current = None
+        if current is not None and current.status is LessonReviewStatus.FULFILLED:
+            edit_review_message(
+                call,
+                f"✅ Заявка №{review.request_id}: методичка "
+                f"№{review.lesson_number} уже выдана.",
+            )
+            answer_review_callback(
+                call,
+                "❌ Методичка уже выдана; отказать нельзя.",
+                show_alert=True,
+            )
+            return
+        user_notified = current is not None and current.user_notified_at is not None
+        if user_notified and notification_result == "busy":
+            notification_result = "already"
+        notification_pending = notification_result == "busy" and not user_notified
+        edit_review_message(
+            call,
+            f"❌ Заявка №{review.request_id} отклонена.\n"
+            f"Telegram ID: {review.telegram_id}\nMEXC UID: {review.mexc_uid}"
+            + (
+                ""
+                if user_notified
+                else (
+                    "\n\n⏳ Уведомление пользователю обрабатывается. "
+                    "Если оно не придёт, повторите через 2 минуты."
+                    if notification_pending
+                    else "\n\n⚠️ Пользователь пока не уведомлён."
+                )
+            ),
+            reply_markup=(
+                None
+                if user_notified
+                else build_rejection_notification_retry_markup(review.request_id)
+            ),
+        )
+        answer_review_callback(
+            call,
+            {
+                "sent": "Заявка отклонена, пользователь уведомлён.",
+                "already": "Заявка уже отклонена.",
+                "busy": "⏳ Обработка заявки уже выполняется.",
+                "failed": "⚠️ Отказ сохранён, но уведомление не доставлено.",
+            }[notification_result],
+            show_alert=not user_notified,
+        )
+        return
+
+    delivery = deliver_approved_lesson_review(review)
+    if delivery == REVIEW_DELIVERY_DELIVERED:
+        edit_review_message(
+            call,
+            f"✅ Заявка №{review.request_id} одобрена.\n"
+            f"Методичка №{review.lesson_number} выдана Telegram ID "
+            f"{review.telegram_id}.",
+        )
+        answer_review_callback(call, "Методичка выдана.")
+    elif delivery == REVIEW_DELIVERY_BUSY:
+        answer_review_callback(call, "⏳ Отправка уже выполняется.")
+    else:
+        edit_review_message(
+            call,
+            f"⚠️ Заявка №{review.request_id} одобрена, но PDF не "
+            "доставлен. Повторите отправку.",
+            reply_markup=build_lesson_review_markup(
+                review.request_id,
+                retry_only=True,
+            ),
+        )
+        answer_review_callback(
+            call,
+            "⚠️ Не удалось доставить PDF. Кнопка осталась для повтора.",
+            show_alert=True,
+        )
 
 
 @bot.message_handler(
@@ -848,6 +1565,14 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
         activity_state=activity_state,
         now_ms=now_ms if lesson_number == 5 else None,
     )
+    if (
+        lesson_number in (3, 7)
+        and referral.trading_amount is None
+        and result.status is EligibilityStatus.INELIGIBLE
+    ):
+        submit_lesson_review(user_id, lesson_number)
+        return
+
     bot.send_message(user_id, result.message)
     if result.status is EligibilityStatus.ELIGIBLE:
         issue_lesson_once(user_id, lesson_number)
