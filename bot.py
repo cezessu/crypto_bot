@@ -459,6 +459,11 @@ def get_lesson_requirement_text(lesson_number):
     """Explain the unlock condition before starting a lesson check."""
 
     requirements = {
+        1: (
+            "📘 <b>Как получить методичку №1</b>\n\n"
+            f'Подпишись на <a href="https://t.me/{CHANNEL_USERNAME}">канал Growth Trade</a>, '
+            "нажми «📘 Методичка №1» и затем «✅ Проверить подписку»."
+        ),
         2: (
             "📘 <b>Как получить методичку №2</b>\n\n"
             f'1. <a href="{MEXC_REFERRAL_URL}">Зарегистрируйся на MEXC по нашей ссылке</a>.\n'
@@ -508,6 +513,29 @@ def send_already_issued_guidance(chat_id, lesson_number):
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+def redirect_to_first_missing_lesson(message, requested_lesson, missing_lesson):
+    """Keep the course sequential and resume the first unfinished step."""
+
+    user_id = message.from_user.id
+    bot.send_message(
+        user_id,
+        f"🔒 Методичка №{requested_lesson} пока недоступна.\n\n"
+        f"Вы ещё не получили методичку №{missing_lesson}. "
+        "Сначала выполните её условие — продолжим с этого шага.",
+        reply_markup=build_main_menu(),
+    )
+    if missing_lesson == 1:
+        bot.send_message(
+            user_id,
+            get_lesson_requirement_text(1),
+            reply_markup=build_subscription_markup(),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
+    process_lesson_request(message, missing_lesson)
 
 
 
@@ -3160,6 +3188,28 @@ def main_menu_handler(message):
 
     if lesson_number == 1:
 
+        try:
+
+            if storage.is_lesson_issued(message.from_user.id, 1):
+
+                send_already_issued_guidance(message.from_user.id, 1)
+
+                return
+
+        except (StorageError, sqlite3.Error):
+
+            logger.error("Lesson 1 state storage is unavailable")
+
+            bot.send_message(
+
+                message.from_user.id,
+
+                "⚠️ Хранилище временно недоступно. Попробуйте позже.",
+
+            )
+
+            return
+
         show_lesson1_subscription_prompt(message.from_user.id)
 
         return
@@ -3180,6 +3230,22 @@ def process_lesson_request(message, lesson_number):
 
         already_issued = storage.is_lesson_issued(user_id, lesson_number)
 
+        first_missing_lesson = next(
+
+            (
+
+                previous_lesson
+
+                for previous_lesson in range(1, lesson_number)
+
+                if not storage.is_lesson_issued(user_id, previous_lesson)
+
+            ),
+
+            None,
+
+        )
+
         qualified_invites = storage.count_qualified_invites(user_id)
 
         user_state = storage.get_user(user_id)
@@ -3196,6 +3262,14 @@ def process_lesson_request(message, lesson_number):
 
     if already_issued:
         send_already_issued_guidance(user_id, lesson_number)
+        return
+
+    if first_missing_lesson is not None:
+        redirect_to_first_missing_lesson(
+            message,
+            lesson_number,
+            first_missing_lesson,
+        )
         return
 
     requirement_text = get_lesson_requirement_text(lesson_number)
@@ -3335,6 +3409,10 @@ def process_uid(message, lesson_number):
     uid = (message.text or '').strip()
 
     logger.info("Processing MEXC lesson request lesson=%s", lesson_number)
+
+    if uid in MENU_LESSON_BUTTONS or uid == MENU_REFERRAL_BUTTON:
+        main_menu_handler(message)
+        return
 
 
 
