@@ -1,3 +1,4 @@
+
 import os
 import io
 import time
@@ -68,10 +69,16 @@ class SafeBotExceptionHandler:
         log_telegram_error("Telegram handler failed", exception)
         return True
 
+
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
+
 TOKEN = os.environ.get('BOT_TOKEN')
+
 if not TOKEN:
+
     raise ValueError("BOT_TOKEN не найден в переменных окружения")
+
+
 
 # Process webhook updates inside the Gunicorn request. TeleBot's own worker
 # queue can acknowledge an update before its handler has actually run.
@@ -83,8 +90,11 @@ bot = telebot.TeleBot(
 )
 app = Flask(__name__)
 
+
+
 # --- НАСТРОЙКИ ---
 CHANNEL_USERNAME = "tradegrowthh"
+MEXC_REFERRAL_URL = "https://promote.mexc.com/r/RV1DdMzE"
 DEFAULT_ADMIN_TELEGRAM_ID = 1042857576
 MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807
 LESSON_DELIVERY_LEASE_MS = 10 * 60 * 1000
@@ -134,16 +144,28 @@ if os.environ.get('RENDER_EXTERNAL_HOSTNAME') and storage.backend_name == "sqlit
         "for persistent state"
     )
 
+
 # --- ФАЙЛЫ МЕТОДИЧЕК ---
+
 LESSON_FILES = {
+
     1: {"main": "Фундаментальныеосновы.pdf", "bonus": None},
+
     2: {"main": "2_урок.pdf", "bonus": "Дополнительно к 2 уроку.pdf"},
+
     3: {"main": "3_урок.pdf", "bonus": "Дополнительно к 3 уроку.pdf"},
+
     4: {"main": "4_урок.pdf", "bonus": None},
+
     5: {"main": "5_урок.pdf", "bonus": "Дополнительно к 5 уроку.pdf"},
+
     6: {"main": "6_урок.pdf", "bonus": None},
+
     7: {"main": "7_урок.pdf", "bonus": "Дополнительно к 7 уроку.pdf"},
+
 }
+
+
 
 # --- ИНИЦИАЛИЗАЦИЯ MEXC API И КЭША ---
 try:
@@ -238,47 +260,89 @@ def get_bot_username():
             _bot_username = bot.get_me().username
         return _bot_username
 
+
 # --- КАПЧА ---
+
 captcha_data = {}
 
+
+
 def generate_captcha_text(length=5):
+
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
     return ''.join(random.choices(chars, k=length))
+
+
 
 def draw_captcha(text):
     W, H = 400, 130
+
     img = Image.new('RGB', (W, H), color=(245, 245, 245))
+
     draw = ImageDraw.Draw(img)
 
+
+
     for _ in range(random.randint(100, 150)):
+
         x = random.randint(0, W-1)
+
         y = random.randint(0, H-1)
+
         draw.point((x, y), fill=(random.randint(180, 220), random.randint(180, 220), random.randint(180, 220)))
 
+
+
     for _ in range(random.randint(1, 2)):
+
         x1 = random.randint(0, W)
+
         y1 = random.randint(0, H)
+
         x2 = random.randint(0, W)
+
         y2 = random.randint(0, H)
+
         draw.line([(x1, y1), (x2, y2)], fill=(random.randint(200, 230), random.randint(200, 230), random.randint(200, 230)), width=2)
 
+
+
     try:
+
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
+
     except:
+
         try:
+
             font = ImageFont.truetype("arial.ttf", 60)
+
         except:
+
             font = ImageFont.load_default()
 
+
+
     x_offset = 25
+
     for ch in text:
+
         txt_img = Image.new('RGBA', (80, 100), (0, 0, 0, 0))
+
         txt_draw = ImageDraw.Draw(txt_img)
+
         txt_draw.text((5, 5), ch, font=font, fill=(10, 10, 10))
+
         angle = random.randint(-15, 15)
+
         rotated = txt_img.rotate(angle, expand=1, resample=Image.BICUBIC)
+
         img.paste(rotated, (x_offset, random.randint(20, 35)), rotated)
+
         x_offset += 55 + random.randint(5, 10)
+
+
 
     buf = io.BytesIO()
     img.save(buf, format='PNG')
@@ -303,33 +367,62 @@ def send_captcha(chat_id, attempts):
         "blocked_until": 0
     }
 
+
 def check_captcha(user_id, user_text):
+
     if user_id not in captcha_data:
+
         return False
+
     data = captcha_data[user_id]
+
     if data["blocked_until"] > 0:
+
         if time.time() < data["blocked_until"]:
+
             remaining = int(data["blocked_until"] - time.time())
+
             bot.send_message(user_id, f"⏳ Вы исчерпали попытки. Попробуйте через {remaining} сек.")
-            return False
-        else:
-            del captcha_data[user_id]
+
             return False
 
-    if user_text.strip().upper() == data["answer"].upper():
-        del captcha_data[user_id]
-        return True
-    else:
-        data["attempts"] += 1
-        if data["attempts"] >= 5:
-            data["blocked_until"] = time.time() + 300
-            bot.send_message(user_id, "❌ 5 неверных попыток. Доступ заблокирован на 5 минут.")
-            return False
         else:
-            remaining = 5 - data["attempts"]
-            bot.send_message(user_id, f"❌ Неверно. Осталось попыток: {remaining}")
-            send_captcha(user_id, data["attempts"])
+
+            del captcha_data[user_id]
+
             return False
+
+
+
+    if user_text.strip().upper() == data["answer"].upper():
+
+        del captcha_data[user_id]
+
+        return True
+
+    else:
+
+        data["attempts"] += 1
+
+        if data["attempts"] >= 5:
+
+            data["blocked_until"] = time.time() + 300
+
+            bot.send_message(user_id, "❌ 5 неверных попыток. Доступ заблокирован на 5 минут.")
+
+            return False
+
+        else:
+
+            remaining = 5 - data["attempts"]
+
+            bot.send_message(user_id, f"❌ Неверно. Осталось попыток: {remaining}")
+
+            send_captcha(user_id, data["attempts"])
+
+            return False
+
+
 
 # --- ВЕБХУКИ ---
 def configure_render_webhook():
@@ -396,41 +489,74 @@ def webhook():
     # webhook on every GET can briefly interrupt update delivery.
     return "Bot is running", 200
 
+
 # --- ТЕКСТЫ ---
+
 WELCOME_TEXT = (
+
     "Приветствую!\n"
+
     "Наша команда дает возможность обучиться криптотрейдингу бесплатно. "
+
     "Никакой воды, только рабочие инструменты. "
+
     "Жми кнопку и успевай забрать знания бесплатно."
+
 )
+
 SUBSCRIBE_TEXT = "Подпишись на канал и получи методичку 👇"
 
+
+
 # --- ТЕКСТЫ ПОСЛЕ МЕТОДИЧЕК ---
+
 def get_after_lesson_text(lesson_number):
+
     if lesson_number == 1:
+
         return (
+
             "Поздравляю! Ты сделал первый шаг!\n\n"
+
             "Теперь у тебя есть база. Дальше — реальный трейдинг.\n\n"
+
             "Следующая методичка:\n\n"
+
             "📘 Методичка №2 — Уровни, Фибоначчи, OI, EMA, RSI\n"
-            "✅ Условие: Зарегистрироваться по реферальной ссылке и совершить сделку\n\n"
+
+            f'✅ Условие: <a href="{MEXC_REFERRAL_URL}">'
+            "Зарегистрироваться по реферальной ссылке</a> и совершить сделку\n\n"
             "---\n\n"
+
             "Как получить следующую методичку (№2):\n\n"
-            "1. Зарегистрируйся по реферальной ссылке и соверши первую сделку\n"
+            f'1. <a href="{MEXC_REFERRAL_URL}">'
+            "Зарегистрируйся по реферальной ссылке</a> и соверши первую сделку\n"
             "2. Нажми кнопку «📘 Методичка №2» в меню внизу\n"
             "3. Бот попросит ввести твой UID (цифры из профиля MEXC)\n"
             "4. Введи UID — и получишь второй урок!\n"
+
             "(UID можно найти в профиле MEXC — это число из 8–10 цифр)\n\n"
+
             "Удачи на пути к профи! 🚀"
+
         )
+
     elif lesson_number == 2:
+
         return (
+
             "Отлично! Ты получил вторую методичку!\n\n"
+
             "Ты уже научился работать с уровнями и индикаторами. Время двигаться дальше.\n\n"
+
             "Следующая методичка:\n\n"
+
             "📘 Методичка №3 — Price Action, инсайд-бары, кластерный анализ\n"
+
             "✅ Условие: Общий объём сделок от 300 USDT\n\n"
+
             "---\n\n"
+
             "Как получить следующую методичку (№3):\n\n"
             "1. Продолжай торговать, пока общий объём не достигнет 300 USDT\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт объём 300 USDT. Всего одна такая сделка — и условие выполнено!)\n"
@@ -439,7 +565,9 @@ def get_after_lesson_text(lesson_number):
             "у администратора\n"
             "4. После ручной проверки администратор выдаст третий урок\n\n"
             "Удачи на пути к профи! 🚀"
+
         )
+
     elif lesson_number == 3:
         return (
             "Красава! Ты освоил Price Action!\n\n"
@@ -469,42 +597,75 @@ def get_after_lesson_text(lesson_number):
             "Удачи на пути к профи! 🚀"
         )
     elif lesson_number == 6:
+
         return (
+
             "Огонь! У тебя уже 2 друга в команде!\n\n"
+
             "Остался последний рывок — самый мощный урок.\n\n"
+
             "Следующая (финальная) методичка:\n\n"
+
             "📘 Методичка №7 — Фундаментальный анализ 2.0 (токеномика, тренды, оценка проектов)\n"
+
             "✅ Условие: Объём от 5 000 USDT или привести 3 друзей\n\n"
+
             "---\n\n"
+
             "Как получить финальную методичку (№7):\n\n"
+
             "1. Наторгуй на объём 5 000 USDT ИЛИ приведи третьего друга\n"
             "(Объём считается с учётом плеча. Пример: сделка на 100 USDT с плечом ×3 даёт 300 USDT. Для 5 000 USDT нужно около 17 таких сделок. Реально за пару недель!)\n"
             "(Свою персональную Telegram-ссылку можно получить кнопкой «👥 Моя ссылка и друзья»)\n"
             "2. Нажми кнопку «📘 Методичка №7»\n"
             "3. Ветку с тремя приглашёнными бот проверяет автоматически; объём — через администратора.\n\n"
             "Это финиш! Ты почти у цели! 🚀"
+
         )
+
     elif lesson_number == 7:
+
         return (
+
             "ПОЗДРАВЛЯЮ! ТЫ ПРОШЁЛ ВЕСЬ КУРС!\n\n"
+
             "Ты прошёл путь от новичка до полноценного трейдера, который умеет:\n"
+
             "- Анализировать рынок\n"
+
             "- Читать объёмы\n"
+
             "- Видеть паттерны\n"
+
             "- Оценивать проекты\n\n"
+
             "Теперь ты — самостоятельный трейдер. Дальше только практика и твой личный рост!\n\n"
+
             "Если хочешь оставаться в курсе новых материалов — следи за каналом.\n"
+
             "По всем вопросам пиши админу.\n\n"
+
             "Удачи в больших сделках! 🔥💎"
+
         )
+
     return ""
 
+
+
 def is_subscribed(user_id):
+
     try:
+
         member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
+
         return member.status in ['member', 'administrator', 'creator']
+
     except:
+
         return False
+
+
 
 # --- ОТПРАВКА МЕТОДИЧКИ ---
 def send_lesson_part(
@@ -543,12 +704,20 @@ def send_lesson_part(
 
 def send_lesson(chat_id, lesson_number, delivery_token):
     files = LESSON_FILES.get(lesson_number)
+
     if not files:
+
         bot.send_message(chat_id, "❌ Методичка не найдена.")
+
         return False
 
+
+
     main_file = files.get("main")
+
     bonus_file = files.get("bonus")
+
+
 
     if not send_lesson_part(
         chat_id,
@@ -577,6 +746,8 @@ def send_lesson(chat_id, lesson_number, delivery_token):
                 chat_id,
                 after_text,
                 reply_markup=build_main_menu(),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
                 timeout=30,
             )
         except Exception as exc:
@@ -980,7 +1151,9 @@ def edit_review_message(call, text, *, reply_markup=None):
         # Telegram still allows the old admin message to be edited.
         log_telegram_error("Manual review admin message edit failed", exc)
 
+
 # --- ОБРАБОТЧИКИ ---
+
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
@@ -1052,9 +1225,13 @@ def referral_handler(message):
 def menu_handler(message):
     send_main_menu(message.from_user.id)
 
+
 @bot.message_handler(func=lambda msg: msg.from_user.id in captcha_data and not msg.text.startswith('/'))
+
 def captcha_input(message):
+
     user_id = message.from_user.id
+
     if check_captcha(user_id, message.text):
         markup = types.InlineKeyboardMarkup()
         btn_get = types.InlineKeyboardButton("📥 Забрать методичку", callback_data='request_pdf')
@@ -1085,7 +1262,10 @@ def handle_request_pdf(call):
         text=SUBSCRIBE_TEXT,
         reply_markup=build_subscription_markup()
     )
+
     bot.answer_callback_query(call.id)
+
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'check_sub')
 def handle_check_sub(call):
@@ -1582,21 +1762,30 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
 def get_lesson2(message):
     process_lesson_request(message, 2)
 
+
 @bot.message_handler(commands=['get_lesson3'])
+
 def get_lesson3(message):
     process_lesson_request(message, 3)
 
+
 @bot.message_handler(commands=['get_lesson4'])
+
 def get_lesson4(message):
     process_lesson_request(message, 4)
 
+
 @bot.message_handler(commands=['get_lesson5'])
+
 def get_lesson5(message):
     process_lesson_request(message, 5)
 
+
 @bot.message_handler(commands=['get_lesson6'])
+
 def get_lesson6(message):
     process_lesson_request(message, 6)
+
 
 @bot.message_handler(commands=['get_lesson7'])
 def get_lesson7(message):
