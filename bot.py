@@ -516,7 +516,7 @@ def send_already_issued_guidance(chat_id, lesson_number):
 
 
 def redirect_to_first_missing_lesson(message, requested_lesson, missing_lesson):
-    """Keep the course sequential and resume the first unfinished step."""
+    """Keep the course sequential without repeating the prerequisite flow."""
 
     user_id = message.from_user.id
     bot.send_message(
@@ -526,16 +526,6 @@ def redirect_to_first_missing_lesson(message, requested_lesson, missing_lesson):
         "Сначала выполните её условие — продолжим с этого шага.",
         reply_markup=build_main_menu(),
     )
-    if missing_lesson == 1:
-        bot.send_message(
-            user_id,
-            get_lesson_requirement_text(1),
-            reply_markup=build_subscription_markup(),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        return
-    process_lesson_request(message, missing_lesson)
 
 
 
