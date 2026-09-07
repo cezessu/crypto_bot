@@ -1,4 +1,3 @@
-
 """Persistent bot state and environment-based storage selection.
 
 SQLite remains available for local development and tests.  Render can use a

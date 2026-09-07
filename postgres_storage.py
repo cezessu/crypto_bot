@@ -1,4 +1,3 @@
-
 """Supabase Postgres implementation of the bot storage interface."""
 
 from __future__ import annotations

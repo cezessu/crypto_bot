@@ -71,6 +71,12 @@ class BotImportTests(unittest.TestCase):
             spec.loader.exec_module(module)
 
             self.assertEqual(set(module.LESSON_FILES), set(range(1, 8)))
+            lesson_one_text = module.get_after_lesson_text(1)
+            self.assertIn("Выберите биржу", lesson_one_text)
+            self.assertIn("первая сделка", module.get_lesson_requirement_text(2))
+            for lesson_number in range(1, 8):
+                self.assertIn(f"Методичка №{lesson_number}", module.get_lesson_requirement_text(lesson_number))
+            self.assertTrue(callable(module.exchange_callback))
             self.assertTrue(callable(module.start_handler))
             self.assertTrue(callable(module.referral_handler))
             self.assertIsNotNone(module.bot.exception_handler)

@@ -101,4 +101,3 @@ class PartnerClient:
 
     def validate_user(self, uid):
         return self.request("/partner/api/v2/openapi/validateUser", {"account": str(uid)})
-

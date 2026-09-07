@@ -149,4 +149,3 @@ class BitunixClient:
                             trading_amount=volume if volume_known else None,
                             first_trade_time=first, last_trade_time=last,
                             invite_time=int(registration.timestamp() * 1000))
-
