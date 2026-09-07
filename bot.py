@@ -153,15 +153,23 @@ LESSON_VIDEO_URLS = {
     7: "https://t.me/tradegrowthh/362",
 }
 
-# Independent exchange clients. Never borrow the production bot configuration.
+# Preserve the existing MEXC environment loader, including pasted whitespace cleanup.
 exchange_clients = {"mexc": None, "bitunix": None}
-for exchange, factory in (("mexc", MexcClient), ("bitunix", BitunixClient)):
-    key, secret = SETTINGS.get(exchange.upper() + "_API_KEY"), SETTINGS.get(exchange.upper() + "_API_SECRET")
-    if key and secret:
-        try:
-            exchange_clients[exchange] = factory(key, secret)
-        except (ValueError, MexcConfigurationError):
-            logger.error("Invalid exchange configuration exchange=%s", exchange)
+try:
+    exchange_clients["mexc"] = MexcClient.from_env(SETTINGS)
+except (ValueError, MexcConfigurationError):
+    logger.error("Invalid exchange configuration exchange=mexc")
+
+bitunix_key = SETTINGS.get("BITUNIX_API_KEY")
+bitunix_secret = SETTINGS.get("BITUNIX_API_SECRET")
+if bitunix_key and bitunix_secret:
+    try:
+        exchange_clients["bitunix"] = BitunixClient(bitunix_key, bitunix_secret)
+    except (ValueError, MexcConfigurationError):
+        logger.error("Invalid exchange configuration exchange=bitunix")
+
+for exchange, client in exchange_clients.items():
+    logger.info("Exchange client configured exchange=%s ready=%s", exchange, client is not None)
 
 mexc = exchange_clients["mexc"]
 
@@ -968,7 +976,7 @@ def show_exchange_choice(user_id, lesson_number=None):
     suffix = f":{lesson_number}" if lesson_number is not None else ""
     markup.row(types.InlineKeyboardButton("MEXC", callback_data=f"exchange:mexc{suffix}"),
                types.InlineKeyboardButton("Bitunix", callback_data=f"exchange:bitunix{suffix}"))
-    text = "Выберите биржу, на которой зарегистрированы по ссылке Алексея:"
+    text = "Выберите биржу, на которой зарегистрированы по реферальной ссылке:"
     if lesson_number is not None:
         text = f"📘 Методичка №{lesson_number}\n\n" + text
     bot.send_message(user_id, text, reply_markup=markup)

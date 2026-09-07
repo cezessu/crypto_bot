@@ -57,8 +57,8 @@ class BotImportTests(unittest.TestCase):
                 "BOT_TOKEN": "123456:TEST",
                 "DATABASE_PATH": str(Path(temp_dir) / "bot.sqlite3"),
                 "SUPABASE_DATABASE_URL": "",
-                "MEXC_API_KEY": "",
-                "MEXC_API_SECRET": "",
+                "MEXC_API_KEY": "  test-key\n",
+                "MEXC_API_SECRET": "\ttest-secret \n",
                 "RENDER_EXTERNAL_HOSTNAME": "crypto-bot.example",
             },
             clear=False,
@@ -70,6 +70,9 @@ class BotImportTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
+            self.assertIsNotNone(module.exchange_clients["mexc"])
+            self.assertEqual(module.exchange_clients["mexc"].api_key, "test-key")
+            self.assertEqual(module.exchange_clients["mexc"].api_secret, "test-secret")
             self.assertEqual(set(module.LESSON_FILES), set(range(1, 8)))
             lesson_one_text = module.get_after_lesson_text(1)
             self.assertIn("MEXC или Bitunix", lesson_one_text)
