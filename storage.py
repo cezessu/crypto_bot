@@ -1,3 +1,4 @@
+
 """Persistent bot state and environment-based storage selection.
 
 SQLite remains available for local development and tests.  Render can use a
@@ -36,6 +37,10 @@ class LessonDeliveryInProgressError(StorageError):
     """A manual review cannot start while the same lesson is being delivered."""
 
 
+ExchangeUidAlreadyBoundError = MexcUidAlreadyBoundError
+UserExchangeUidConflictError = UserMexcUidConflictError
+
+
 class ReferralAssignment(str, Enum):
     ASSIGNED = "assigned"
     ALREADY_ASSIGNED = "already_assigned"
@@ -64,6 +69,12 @@ class UserState:
     activity_confirmed_at: Optional[int]
     activity_baseline_last_trade_time: Optional[int]
     qualified_at: Optional[int]
+    exchange: Optional[str] = None
+    bitunix_uid: Optional[str] = None
+
+    @property
+    def exchange_uid(self):
+        return self.bitunix_uid if self.exchange == "bitunix" else self.mexc_uid
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,11 @@ class LessonReviewRequest:
     decided_at: Optional[int]
     decided_by: Optional[int]
     fulfilled_at: Optional[int]
+
+    @property
+    def exchange_uid(self):
+        # The historical column stores the reviewed UID; exchange is immutable.
+        return self.mexc_uid
 
 
 @dataclass(frozen=True)
@@ -246,6 +262,16 @@ class BotStorage:
                 """
             )
 
+            # Additive migration; no table rebuild and no changes to existing UIDs.
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
+            if "exchange" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN exchange TEXT CHECK (exchange IN ('mexc','bitunix'))")
+            if "bitunix_uid" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN bitunix_uid TEXT")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_bitunix_uid ON users(bitunix_uid)")
+            connection.execute("UPDATE users SET exchange = 'mexc' WHERE mexc_uid IS NOT NULL AND exchange IS NULL")
+
     @staticmethod
     def _lesson_review_from_row(row: sqlite3.Row) -> LessonReviewRequest:
         return LessonReviewRequest(
@@ -282,7 +308,7 @@ class BotStorage:
                 SELECT telegram_id, mexc_uid, inviter_telegram_id,
                        activity_confirmed_at,
                        activity_baseline_last_trade_time,
-                       qualified_at
+                       qualified_at, exchange, bitunix_uid
                 FROM users
                 WHERE telegram_id = ?
                 """,
@@ -299,6 +325,8 @@ class BotStorage:
                 "activity_baseline_last_trade_time"
             ],
             qualified_at=row["qualified_at"],
+            exchange=row["exchange"] or ("mexc" if row["mexc_uid"] else None),
+            bitunix_uid=row["bitunix_uid"],
         )
 
     def assign_inviter(
@@ -345,40 +373,44 @@ class BotStorage:
             )
             return ReferralAssignment.ASSIGNED
 
-    def bind_mexc_uid(self, telegram_id: int, mexc_uid: str) -> None:
+    def set_exchange(self, telegram_id, exchange):
+        if exchange not in ("mexc", "bitunix"):
+            raise ValueError("Unknown exchange")
         now = self.clock_ms()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO users (telegram_id, created_at, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(telegram_id) DO NOTHING
-                """,
-                (telegram_id, now, now),
-            )
-            current = connection.execute(
-                "SELECT mexc_uid FROM users WHERE telegram_id = ?",
-                (telegram_id,),
-            ).fetchone()["mexc_uid"]
-            if current is not None and current != mexc_uid:
-                raise UserMexcUidConflictError(
-                    "Telegram account is already bound to another MEXC UID"
-                )
+            connection.execute("INSERT OR IGNORE INTO users (telegram_id, created_at, updated_at) VALUES (?,?,?)", (telegram_id, now, now))
+            row = connection.execute("SELECT mexc_uid, bitunix_uid, exchange FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            bound_exchange = "mexc" if row["mexc_uid"] is not None else "bitunix" if row["bitunix_uid"] is not None else None
+            if bound_exchange and exchange != bound_exchange:
+                raise UserMexcUidConflictError("Bound exchange cannot be changed")
+            connection.execute("UPDATE users SET exchange = ?, updated_at = ? WHERE telegram_id = ?", (exchange, now, telegram_id))
 
-            owner = connection.execute(
-                "SELECT telegram_id FROM users WHERE mexc_uid = ?",
-                (mexc_uid,),
-            ).fetchone()
-            if owner is not None and owner["telegram_id"] != telegram_id:
-                raise MexcUidAlreadyBoundError(
-                    "MEXC UID is already bound to another Telegram account"
-                )
+    def bind_mexc_uid(self, telegram_id, mexc_uid):
+        self.bind_exchange_uid(telegram_id, mexc_uid, exchange="mexc")
 
-            connection.execute(
-                "UPDATE users SET mexc_uid = ?, updated_at = ? WHERE telegram_id = ?",
-                (mexc_uid, now, telegram_id),
-            )
+    def bind_exchange_uid(self, telegram_id, uid, *, exchange=None):
+        if not isinstance(uid, str) or not uid.isascii() or not uid.isdigit() or len(uid) > 32:
+            raise ValueError("Invalid UID")
+        now = self.clock_ms()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT OR IGNORE INTO users (telegram_id, created_at, updated_at) VALUES (?,?,?)", (telegram_id, now, now))
+            row = connection.execute("SELECT mexc_uid, bitunix_uid, exchange FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            selected = row["exchange"] or ("mexc" if row["mexc_uid"] else None) or exchange
+            if selected not in ("mexc", "bitunix") or (exchange is not None and selected != exchange):
+                raise UserMexcUidConflictError("Exchange changed before binding")
+            column = "mexc_uid" if selected == "mexc" else "bitunix_uid"
+            other = "bitunix_uid" if selected == "mexc" else "mexc_uid"
+            if row[other] is not None or (row[column] is not None and row[column] != uid):
+                raise UserMexcUidConflictError("A different UID is already bound")
+            owner = connection.execute(f"SELECT telegram_id FROM users WHERE {column} = ?", (uid,)).fetchone()
+            if owner and owner["telegram_id"] != telegram_id:
+                raise MexcUidAlreadyBoundError("UID already belongs to another Telegram account")
+            try:
+                connection.execute(f"UPDATE users SET {column} = ?, exchange = ?, updated_at = ? WHERE telegram_id = ?", (uid, selected, now, telegram_id))
+            except sqlite3.IntegrityError as exc:
+                raise MexcUidAlreadyBoundError("UID already belongs to another Telegram account") from exc
 
     def record_activity_confirmation(
         self,
@@ -414,7 +446,7 @@ class BotStorage:
                 """
                 UPDATE users
                 SET qualified_at = COALESCE(qualified_at, ?), updated_at = ?
-                WHERE telegram_id = ? AND mexc_uid IS NOT NULL
+                WHERE telegram_id = ? AND (mexc_uid IS NOT NULL OR bitunix_uid IS NOT NULL)
                 """,
                 (now, now, telegram_id),
             )
@@ -428,7 +460,7 @@ class BotStorage:
                 SELECT COUNT(*) AS count
                 FROM users
                 WHERE inviter_telegram_id = ?
-                  AND mexc_uid IS NOT NULL
+                  AND (mexc_uid IS NOT NULL OR bitunix_uid IS NOT NULL)
                   AND qualified_at IS NOT NULL
                 """,
                 (inviter_telegram_id,),
@@ -752,7 +784,7 @@ class BotStorage:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             user = connection.execute(
-                "SELECT mexc_uid FROM users WHERE telegram_id = ?",
+                "SELECT COALESCE(bitunix_uid, mexc_uid) AS mexc_uid FROM users WHERE telegram_id = ?",
                 (telegram_id,),
             ).fetchone()
             if user is None or user["mexc_uid"] is None:
