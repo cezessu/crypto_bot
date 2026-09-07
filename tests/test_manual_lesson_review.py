@@ -56,6 +56,7 @@ class FakeTeleBot:
         self.documents = []
         self.edits = []
         self.callback_answers = []
+        self.next_steps = {}
         self.fail_message_chat_ids = set()
         self.fail_next_document = False
         self.fail_document_attempts = set()
@@ -106,8 +107,11 @@ class FakeTeleBot:
     def send_chat_action(self, *args, **kwargs):
         return None
 
-    def register_next_step_handler(self, *args, **kwargs):
-        return None
+    def register_next_step_handler(self, message, callback, *args):
+        self.next_steps.setdefault(message.chat.id, []).append((callback, args))
+
+    def clear_step_handler_by_chat_id(self, chat_id):
+        self.next_steps.pop(chat_id, None)
 
     def edit_message_text(self, **kwargs):
         self.edits.append(kwargs)
@@ -279,10 +283,93 @@ class ManualLessonReviewBotTests(unittest.TestCase):
             item for item in self.module.bot.messages
             if item["chat_id"] == self.user_id
         ]
-        self.assertEqual(len(user_messages), 2)
-        self.assertIn("Выберите биржу", user_messages[0]["text"])
+        self.assertEqual(len(user_messages), 1)
+        self.assertNotIn("Выберите биржу", user_messages[0]["text"])
         self.assertIn("первая сделка", user_messages[0]["text"])
-        self.assertIn("числовой UID", user_messages[1]["text"])
+        self.assertIn("числовой UID", user_messages[0]["text"])
+
+    def test_exchange_selection_continues_to_uid_without_second_lesson_click(self):
+        user_id = 445566
+        self.module.storage.claim_lesson(user_id, 1)
+        self.module.exchange_clients["bitunix"] = object()
+        self.module.process_lesson_for_user(user_id, 2)
+        self.assertEqual(len(self.module.bot.messages), 1)
+        self.assertIn("exchange:bitunix:2", self.markup_callbacks(self.module.bot.messages[-1]["reply_markup"]))
+        self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=user_id, chat_id=user_id))
+        self.assertEqual(len(self.module.bot.messages), 2)
+        self.assertIn("числовой UID", self.module.bot.messages[-1]["text"])
+        self.assertIn("Bitunix", self.module.bot.messages[-1]["text"])
+        self.assertEqual(self.module.bot.next_steps[user_id], [(self.module.process_uid, (2,))])
+        self.assertEqual(self.module.bot.edits[-1]["text"], "✅ Биржа: Bitunix.")
+
+    def test_switch_exchange_replaces_pending_uid_handler(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.exchange_clients["bitunix"] = object()
+        self.module.process_lesson_for_user(self.user_id, 2)
+        self.module.choose_exchange_callback(callback("choose_exchange:2", from_user_id=self.user_id))
+        self.assertNotIn(self.user_id, self.module.bot.next_steps)
+        self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=self.user_id))
+        self.assertEqual(len(self.module.bot.next_steps[self.user_id]), 1)
+        self.assertEqual(self.module.storage.get_user(self.user_id).exchange, "bitunix")
+
+    def test_bound_mexc_user_goes_directly_to_check(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.storage.bind_exchange_uid(self.user_id, self.uid)
+        with patch.object(self.module, "check_lesson_with_uid") as check:
+            self.module.process_lesson_for_user(self.user_id, 2)
+        check.assert_called_once_with(self.user_id, 2, self.uid, force_refresh=False)
+        self.assertEqual(self.module.bot.messages, [])
+
+    def test_stale_selection_cannot_skip_prerequisites_or_change_bound_exchange(self):
+        self.module.exchange_callback(callback("exchange:mexc:3", from_user_id=self.user_id))
+        self.assertNotIn(self.user_id, self.module.bot.next_steps)
+        self.assertIn("не получили методичку №1", self.module.bot.messages[-1]["text"])
+        self.module.storage.bind_exchange_uid(self.user_id, self.uid)
+        self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=self.user_id))
+        self.assertEqual(self.module.storage.get_user(self.user_id).exchange, "mexc")
+        self.assertTrue(self.module.bot.callback_answers[-1]["show_alert"])
+
+    def test_invalid_uid_can_be_reentered_immediately(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.process_uid(types.SimpleNamespace(from_user=types.SimpleNamespace(id=self.user_id), text="not a uid"), 2)
+        self.assertIn("Попробуйте ещё раз", self.module.bot.messages[-1]["text"])
+        self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
+        with patch.object(self.module, "check_lesson_with_uid") as check:
+            self.module.process_uid(types.SimpleNamespace(from_user=types.SimpleNamespace(id=self.user_id), text=self.uid), 2)
+        check.assert_called_once_with(self.user_id, 2, self.uid, force_refresh=False)
+
+    def test_uid_prompt_is_for_existing_referrals_on_both_exchanges(self):
+        for exchange in ("mexc", "bitunix"):
+            with self.subTest(exchange=exchange):
+                self.module.storage.set_exchange(self.user_id, exchange)
+                self.module.request_exchange_uid(self.user_id, 2)
+                prompt = self.module.bot.messages[-1]
+                self.assertIn("числовой UID", prompt["text"])
+                self.assertEqual(self.markup_callbacks(prompt["reply_markup"]), {"choose_exchange:2"})
+                self.assertTrue(all(button.url is None for row in prompt["reply_markup"].rows for button in row))
+                self.assertNotIn("ссылку", prompt["text"])
+                self.assertNotIn("зарегистр", prompt["text"])
+
+    def test_old_exchange_button_continues_next_unissued_lesson(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.exchange_callback(callback("exchange:mexc", from_user_id=self.user_id))
+        self.assertIn("числовой UID", self.module.bot.messages[-1]["text"])
+        self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
+
+    def test_unrecognized_uid_keeps_input_open(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        with patch.object(self.module, "get_referral_cached", return_value=None):
+            self.module.check_lesson_with_uid(self.user_id, 2, self.uid)
+        self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
+        self.assertIsNone(self.module.storage.get_user(self.user_id).exchange_uid)
+
+    def test_exchange_choice_does_not_award_lesson_when_client_unavailable(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.exchange_clients["bitunix"] = None
+        self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=self.user_id))
+        self.assertFalse(self.module.storage.is_lesson_issued(self.user_id, 2))
+        self.assertNotIn(self.user_id, self.module.bot.next_steps)
+        self.assertIn("временно недоступна", self.module.bot.messages[-1]["text"])
 
     def test_future_lesson_redirects_to_first_missing_lesson(self):
         self.module.exchange_clients["mexc"] = object()
@@ -358,7 +445,7 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         guidance = self.module.bot.messages[-1]
         self.assertIn("уже была вам выдана", guidance["text"])
         self.assertIn("Методичка №2", guidance["text"])
-        self.assertIn("Выберите биржу", guidance["text"])
+        self.assertIn("MEXC или Bitunix", guidance["text"])
         self.assertIsNotNone(guidance["reply_markup"])
 
     def test_all_seven_lessons_deliver_all_eleven_pdfs_once(self):

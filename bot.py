@@ -221,11 +221,11 @@ def send_main_menu(chat_id, text="Выберите методичку или о�
 def get_lesson_requirement_text(lesson_number):
     requirements = {
         1: 'Подпишитесь на <a href="https://t.me/tradegrowthh">канал Growth Trade</a> и проверьте подписку.',
-        2: 'Выберите биржу кнопкой «🏦 Биржа». Нужны регистрация по нашей ссылке, первая сделка и ваш UID.',
+        2: 'Нужны регистрация на MEXC или Bitunix по ссылке команды и первая сделка. Бот проверит их по вашему UID.',
         3: 'Нужен общий торговый объём от 300. Для Bitunix — объём в USD по API, для MEXC — в USDT с проверкой администратора.',
-        4: 'Пригласите 1 друга по своей ссылке бота. Друг должен привязать UID биржи или Bitunix и подтвердить сделку.',
+        4: 'Пригласите 1 друга по своей ссылке бота. Друг должен привязать UID MEXC или Bitunix и подтвердить сделку.',
         5: 'Через 30 дней после первого подтверждения активности бот проверит сделку, совершённую после этой контрольной даты.',
-        6: 'Пригласите 2 друзей по своей ссылке бота. Каждый должен привязать UID биржи или Bitunix и подтвердить сделку.',
+        6: 'Пригласите 2 друзей по своей ссылке бота. Каждый должен привязать UID MEXC или Bitunix и подтвердить сделку.',
         7: 'Нужен общий объём от 5 000 (Bitunix — USD по API, MEXC — USDT с ручной проверкой) или 3 квалифицированных друга.',
     }
     return f"📘 <b>Методичка №{lesson_number}</b>\n\n" + requirements.get(lesson_number, "")
@@ -250,10 +250,9 @@ def send_already_issued_guidance(chat_id, lesson_number):
     )
 
 
-def redirect_to_first_missing_lesson(message, requested_lesson, missing_lesson):
+def redirect_to_first_missing_lesson(user_id, requested_lesson, missing_lesson):
     """Keep the course sequential without repeating the prerequisite flow."""
 
-    user_id = message.from_user.id
     bot.send_message(
         user_id,
         f"🔒 Методичка №{requested_lesson} пока недоступна.\n\n"
@@ -958,16 +957,21 @@ def edit_review_message(call, text, *, reply_markup=None):
         log_telegram_error("Manual review admin message edit failed", exc)
 
 # --- ОБРАБОТЧИКИ ---
-def show_exchange_choice(user_id):
+def show_exchange_choice(user_id, lesson_number=None):
+    bot.clear_step_handler_by_chat_id(user_id)
     storage.ensure_user(user_id)
     user = storage.get_user(user_id)
     if user.exchange_uid:
         bot.send_message(user_id, f"Ваша биржа: {EXCHANGE_NAMES[user.exchange]}. UID уже привязан; смена доступна через администратора.", reply_markup=build_main_menu())
         return
     markup = types.InlineKeyboardMarkup()
-    markup.row(types.InlineKeyboardButton("MEXC", callback_data="exchange:mexc"),
-               types.InlineKeyboardButton("Bitunix", callback_data="exchange:bitunix"))
-    bot.send_message(user_id, "Выберите биржу, на которой зарегистрированы по ссылке команды:", reply_markup=markup)
+    suffix = f":{lesson_number}" if lesson_number is not None else ""
+    markup.row(types.InlineKeyboardButton("MEXC", callback_data=f"exchange:mexc{suffix}"),
+               types.InlineKeyboardButton("Bitunix", callback_data=f"exchange:bitunix{suffix}"))
+    text = "Выберите биржу, на которой зарегистрированы по ссылке Алексея:"
+    if lesson_number is not None:
+        text = f"📘 Методичка №{lesson_number}\n\n" + text
+    bot.send_message(user_id, text, reply_markup=markup)
 
 
 @bot.message_handler(commands=['exchange'])
@@ -975,30 +979,62 @@ def exchange_command(message):
     show_exchange_choice(message.from_user.id)
 
 
-@bot.callback_query_handler(func=lambda call: call.data in ('exchange:mexc', 'exchange:bitunix'))
+@bot.callback_query_handler(func=lambda call: bool(re.fullmatch(r'exchange:(mexc|bitunix)(:[2-7])?', call.data or '')))
 def exchange_callback(call):
     user_id = call.from_user.id
-    exchange = call.data.split(':')[1]
+    parts = call.data.split(':')
+    exchange = parts[1]
     try:
         storage.set_exchange(user_id, exchange)
+        next_lesson = next((n for n in range(1, 8) if not storage.is_lesson_issued(user_id, n)), None)
     except UserExchangeUidConflictError:
         bot.answer_callback_query(call.id, "UID уже привязан. Смена биржи запрещена.", show_alert=True)
         return
-    bot.answer_callback_query(call.id, "Биржа выбрана")
-    url = MEXC_REFERRAL_URL if exchange == "mexc" else SETTINGS.get("BITUNIX_REFERRAL_URL", "")
-    text = f"Выбрана биржа {EXCHANGE_NAMES[exchange]}.\n"
-    if url.startswith('https://'):
-        text += f"Ссылка команды для регистрации: {url}\n"
+    except (StorageError, sqlite3.Error):
+        answer_review_callback(call, "Не удалось сохранить выбор. Попробуйте ещё раз.", show_alert=True)
+        return
+    answer_review_callback(call, "Биржа выбрана")
+    edit_review_message(call, f"✅ Биржа: {EXCHANGE_NAMES[exchange]}.")
+    # The lesson travels in the button, so continuation survives a restart.
+    if len(parts) == 3:
+        process_lesson_for_user(user_id, int(parts[2]))
+    elif next_lesson is not None and next_lesson >= 2:
+        process_lesson_for_user(user_id, next_lesson)
+    elif next_lesson == 1:
+        show_lesson1_subscription_prompt(user_id)
     else:
-        text += "Если ещё не зарегистрированы, запросите ссылку Bitunix у команды.\n"
-    next_lesson = next((n for n in range(2, 8) if not storage.is_lesson_issued(user_id, n)), 7)
-    text += f"Если уже зарегистрированы и выполнили условие, нажмите «📘 Методичка №{next_lesson}»."
-    send_main_menu(user_id, text)
+        send_main_menu(user_id, "Все 7 методичек уже получены. Материалы доступны в переписке.")
+
+
+def request_exchange_uid(user_id, lesson_number, *, retry=False):
+    user = storage.get_user(user_id)
+    if not user or not user.exchange:
+        show_exchange_choice(user_id, lesson_number)
+        return
+    exchange_name = EXCHANGE_NAMES[user.exchange]
+    markup = types.InlineKeyboardMarkup()
+    text = f"📘 Методичка №{lesson_number} · {exchange_name}\n\n"
+    if retry:
+        text += "UID должен содержать только цифры (до 32 знаков). Попробуйте ещё раз.\n\n"
+    elif lesson_number == 2:
+        text += "Для получения методички нужна первая сделка.\n\n"
+    text += f"Откройте профиль {exchange_name}, скопируйте числовой UID и отправьте его сюда."
+    markup.add(types.InlineKeyboardButton("Выбрать другую биржу", callback_data=f"choose_exchange:{lesson_number}"))
+    bot.clear_step_handler_by_chat_id(user_id)
+    prompt = bot.send_message(user_id, text, reply_markup=markup)
+    bot.register_next_step_handler(prompt, process_uid, lesson_number)
+
+
+@bot.callback_query_handler(func=lambda call: bool(re.fullmatch(r'choose_exchange:[2-7]', call.data or '')))
+def choose_exchange_callback(call):
+    answer_review_callback(call, "Выберите биржу")
+    show_exchange_choice(call.from_user.id, int(call.data.split(':')[1]))
 
 
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
+    bot.clear_step_handler_by_chat_id(user_id)
     logger.info("Telegram /start handler started")
     course_started = False
     try:
@@ -1393,6 +1429,7 @@ def handle_lesson_review_callback(call):
     or (message.text or '') in (MENU_REFERRAL_BUTTON, MENU_EXCHANGE_BUTTON)
 )
 def main_menu_handler(message):
+    bot.clear_step_handler_by_chat_id(message.from_user.id)
     action = message.text or ''
     if action == MENU_EXCHANGE_BUTTON:
         show_exchange_choice(message.from_user.id)
@@ -1420,7 +1457,11 @@ def main_menu_handler(message):
 
 # --- КОМАНДЫ ДЛЯ МЕТОДИЧЕК №2-№7 ---
 def process_lesson_request(message, lesson_number):
-    user_id = message.from_user.id
+    process_lesson_for_user(message.from_user.id, lesson_number)
+
+
+def process_lesson_for_user(user_id, lesson_number):
+    bot.clear_step_handler_by_chat_id(user_id)
     try:
         storage.ensure_user(user_id)
         already_issued = storage.is_lesson_issued(user_id, lesson_number)
@@ -1445,20 +1486,11 @@ def process_lesson_request(message, lesson_number):
 
     if first_missing_lesson is not None:
         redirect_to_first_missing_lesson(
-            message,
+            user_id,
             lesson_number,
             first_missing_lesson,
         )
         return
-
-    requirement_text = get_lesson_requirement_text(lesson_number)
-    if requirement_text:
-        bot.send_message(
-            user_id,
-            requirement_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
 
     if lesson_number in (4, 6) or (lesson_number == 7 and qualified_invites >= 3):
         result = evaluate_lesson(
@@ -1497,7 +1529,7 @@ def process_lesson_request(message, lesson_number):
         return
 
     if not user_state or not user_state.exchange:
-        show_exchange_choice(user_id)
+        show_exchange_choice(user_id, lesson_number)
         return
     if exchange_clients.get(user_state.exchange) is None:
         bot.send_message(user_id, f"⚠️ Проверка {EXCHANGE_NAMES[user_state.exchange]} временно недоступна. Обратитесь к администратору.")
@@ -1512,12 +1544,7 @@ def process_lesson_request(message, lesson_number):
         )
         return
 
-    instruction_text = (
-        f"🔍 Откройте профиль на {EXCHANGE_NAMES[user_state.exchange]} и скопируйте числовой UID.\n\n"
-        "Отправьте UID ответом на это сообщение:"
-    )
-    prompt_message = bot.send_message(user_id, instruction_text, parse_mode="HTML")
-    bot.register_next_step_handler(prompt_message, process_uid, lesson_number)
+    request_exchange_uid(user_id, lesson_number)
 
 
 def process_uid(message, lesson_number):
@@ -1529,12 +1556,23 @@ def process_uid(message, lesson_number):
         main_menu_handler(message)
         return
 
+    command_name = uid.split()[0].split('@')[0] if uid else ''
+    if command_name == '/start':
+        start_handler(message)
+        return
+    if command_name == '/exchange':
+        exchange_command(message)
+        return
+    command = re.fullmatch(r'/get_lesson([1-7])(?:@\w+)?', uid)
+    if command:
+        requested = int(command[1])
+        if requested == 1:
+            show_lesson1_subscription_prompt(user_id)
+        else:
+            process_lesson_request(message, requested)
+        return
     if not uid.isascii() or not uid.isdigit() or len(uid) > 32:
-        bot.send_message(
-            user_id,
-            "❌ UID должен содержать только цифры. Повторите через /get_lesson"
-            + str(lesson_number)
-        )
+        request_exchange_uid(user_id, lesson_number, retry=True)
         return
 
     check_lesson_with_uid(
@@ -1553,7 +1591,7 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
         bot.send_message(user_id, "⚠️ Хранилище временно недоступно. Попробуйте позже.")
         return
     if not user_state or not user_state.exchange:
-        show_exchange_choice(user_id)
+        show_exchange_choice(user_id, lesson_number)
         return
     selected_exchange = user_state.exchange
     if storage.is_lesson_issued(user_id, lesson_number):
@@ -1586,10 +1624,16 @@ def check_lesson_with_uid(user_id, lesson_number, uid, *, force_refresh=False):
         return
 
     if referral is None:
-        bot.send_message(
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Выбрать другую биржу", callback_data=f"choose_exchange:{lesson_number}"))
+        prompt = bot.send_message(
             user_id,
-            f"❌ {EXCHANGE_NAMES[selected_exchange]} не подтвердил этот UID как нашего реферала. Проверьте биржу, UID и регистрацию по ссылке команды."
+            f"❌ {EXCHANGE_NAMES[selected_exchange]} не подтвердил этот UID как нашего реферала. "
+            "Проверьте регистрацию по ссылке команды и отправьте UID ещё раз. Если выбрали не ту биржу, измените её кнопкой ниже.",
+            reply_markup=markup,
         )
+        bot.clear_step_handler_by_chat_id(user_id)
+        bot.register_next_step_handler(prompt, process_uid, lesson_number)
         return
 
     try:
