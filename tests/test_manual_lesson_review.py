@@ -1,3 +1,4 @@
+
 import importlib.util
 import os
 import sys
@@ -19,10 +20,10 @@ except ModuleNotFoundError:
 install_requests_stub_if_missing()
 
 from mexc_client import ReferralData
-from storage import LessonDeliveryClaimStatus, LessonReviewStatus
+from storage import BotStorage, LessonDeliveryClaimStatus, LessonReviewStatus
 
 
-ADMIN_ID = 7_629_218_005
+ADMIN_ID = 7_000_000_005
 
 
 class FakeButton:
@@ -156,7 +157,7 @@ def load_bot_module(database_path):
             "BOT_TOKEN": "123456:TEST",
             "DATABASE_PATH": str(database_path),
             "SUPABASE_DATABASE_URL": "",
-            "MEXC_API_KEY": "",
+            "MEXC_API_KEY": "", "BITUNIX_API_KEY": "", "BITUNIX_API_SECRET": "",
             "MEXC_API_SECRET": "",
             "RENDER_EXTERNAL_HOSTNAME": "",
             "ADMIN_TELEGRAM_IDS": str(ADMIN_ID),
@@ -168,7 +169,8 @@ def load_bot_module(database_path):
     ):
         spec = importlib.util.spec_from_file_location(module_name, "bot.py")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        with patch("storage.create_storage_from_env", return_value=BotStorage(str(database_path))):
+            spec.loader.exec_module(module)
     return module
 
 
@@ -200,6 +202,8 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         self.module = load_bot_module(Path(self.temp_dir.name) / "bot.sqlite3")
         self.user_id = 123_456_789
         self.uid = "54458789"
+        self.module.storage.set_exchange(self.user_id, "mexc")
+        self.module.exchange_clients["mexc"] = object()
         self.module.get_referral_cached = lambda uid, **kwargs: (
             unavailable_volume_referral(uid)
         )
@@ -208,6 +212,9 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def submit(self, lesson_number=3):
+        self.module.storage.set_exchange(self.user_id, "mexc")
+        for n in range(1, lesson_number):
+            self.module.storage.claim_lesson(self.user_id, n)
         self.module.check_lesson_with_uid(
             self.user_id,
             lesson_number,
@@ -235,6 +242,125 @@ class ManualLessonReviewBotTests(unittest.TestCase):
             for button in row
             if button.callback_data is not None
         }
+
+    def test_returning_user_start_resumes_without_captcha(self):
+        message = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=self.user_id),
+            text="/start",
+        )
+
+        with patch.object(
+            self.module.storage,
+            "is_lesson_issued",
+            return_value=True,
+        ), patch.object(self.module, "send_captcha") as send_captcha:
+            self.module.start_handler(message)
+
+        send_captcha.assert_not_called()
+        resume = self.module.bot.messages[-1]
+        self.assertEqual(resume["chat_id"], self.user_id)
+        self.assertIn("С возвращением", resume["text"])
+        self.assertIsNotNone(resume["reply_markup"])
+
+    def test_lesson2_explains_requirement_before_requesting_uid(self):
+        self.module.exchange_clients["mexc"] = object()
+        message = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=self.user_id),
+            text="📘 Методичка №2",
+        )
+
+        with patch.object(
+            self.module.storage,
+            "is_lesson_issued",
+            side_effect=lambda _user_id, lesson_number: lesson_number == 1,
+        ):
+            self.module.process_lesson_request(message, 2)
+
+        user_messages = [
+            item for item in self.module.bot.messages
+            if item["chat_id"] == self.user_id
+        ]
+        self.assertEqual(len(user_messages), 2)
+        self.assertIn("Выберите биржу", user_messages[0]["text"])
+        self.assertIn("первая сделка", user_messages[0]["text"])
+        self.assertIn("числовой UID", user_messages[1]["text"])
+
+    def test_future_lesson_redirects_to_first_missing_lesson(self):
+        self.module.exchange_clients["mexc"] = object()
+        message = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=self.user_id),
+            text="📘 Методичка №6",
+        )
+
+        with patch.object(
+            self.module.storage,
+            "is_lesson_issued",
+            side_effect=lambda _user_id, lesson_number: lesson_number == 1,
+        ):
+            self.module.process_lesson_request(message, 6)
+
+        user_messages = [
+            item for item in self.module.bot.messages
+            if item["chat_id"] == self.user_id
+        ]
+        self.assertEqual(len(user_messages), 1)
+        self.assertIn("Методичка №6 пока недоступна", user_messages[0]["text"])
+        self.assertIn("не получили методичку №2", user_messages[0]["text"])
+        self.assertNotIn("Как получить методичку №2", user_messages[0]["text"])
+
+    def test_lesson_button_is_not_misread_as_uid(self):
+        self.module.exchange_clients["mexc"] = object()
+        message = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=self.user_id),
+            text="📘 Методичка №6",
+        )
+
+        with patch.object(
+            self.module.storage,
+            "is_lesson_issued",
+            side_effect=lambda _user_id, lesson_number: lesson_number == 1,
+        ):
+            self.module.process_uid(message, 2)
+
+        user_texts = [
+            item["text"] for item in self.module.bot.messages
+            if item["chat_id"] == self.user_id
+        ]
+        self.assertFalse(any("UID должен содержать" in text for text in user_texts))
+        self.assertTrue(any("не получили методичку №2" in text for text in user_texts))
+        self.assertFalse(any("Где найти свой UID" in text for text in user_texts))
+
+    def test_lesson_skip_from_new_user_redirects_to_lesson1(self):
+        message = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=self.user_id),
+            text="📘 Методичка №4",
+        )
+
+        self.module.process_lesson_request(message, 4)
+
+        user_messages = [
+            item for item in self.module.bot.messages
+            if item["chat_id"] == self.user_id
+        ]
+        self.assertEqual(len(user_messages), 1)
+        self.assertIn("не получили методичку №1", user_messages[0]["text"])
+        self.assertNotIn("Как получить методичку №1", user_messages[0]["text"])
+        self.assertIsNotNone(user_messages[0]["reply_markup"])
+
+    def test_already_issued_lesson_restores_next_step_guidance(self):
+        with patch.object(
+            self.module.storage,
+            "claim_lesson_delivery",
+            return_value=LessonDeliveryClaimStatus.ALREADY_ISSUED,
+        ):
+            delivered = self.module.issue_lesson_once(self.user_id, 1)
+
+        self.assertFalse(delivered)
+        guidance = self.module.bot.messages[-1]
+        self.assertIn("уже была вам выдана", guidance["text"])
+        self.assertIn("Методичка №2", guidance["text"])
+        self.assertIn("Выберите биржу", guidance["text"])
+        self.assertIsNotNone(guidance["reply_markup"])
 
     def test_all_seven_lessons_deliver_all_eleven_pdfs_once(self):
         for lesson_number in range(1, 8):
@@ -292,7 +418,7 @@ class ManualLessonReviewBotTests(unittest.TestCase):
                 }
 
                 self.assertEqual(review.status, LessonReviewStatus.PENDING)
-                self.assertEqual(review.mexc_uid, self.uid)
+                self.assertEqual(review.exchange_uid, self.uid)
                 self.assertEqual(
                     callback_data,
                     {f"mr:a:{review.request_id}", f"mr:r:{review.request_id}"},
@@ -318,7 +444,8 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         )
 
     def test_concurrent_submissions_send_one_admin_notification(self):
-        self.module.storage.bind_mexc_uid(self.user_id, self.uid)
+        self.module.storage.set_exchange(self.user_id, "mexc")
+        self.module.storage.bind_exchange_uid(self.user_id, self.uid)
         original_request = self.module.storage.request_lesson_review
         both_requests_loaded = threading.Barrier(2)
 
@@ -354,21 +481,32 @@ class ManualLessonReviewBotTests(unittest.TestCase):
 
         self.assertIsNone(self.module.storage.get_lesson_review_request(1))
         self.assertEqual(self.admin_messages(), [])
-        self.assertIsNone(self.module.storage.get_user(self.user_id))
+        self.assertIsNone(self.module.storage.get_user(self.user_id).exchange_uid)
 
     def test_lesson7_with_three_qualified_invites_is_automatic(self):
         self.module.storage.ensure_user(self.user_id)
         for offset in range(3):
             friend_id = 200_000_000 + offset
             self.module.storage.assign_inviter(friend_id, self.user_id)
-            self.module.storage.bind_mexc_uid(friend_id, str(80_000_000 + offset))
+            self.module.storage.set_exchange(friend_id, "mexc")
+            self.module.storage.bind_exchange_uid(friend_id, str(80_000_000 + offset))
             self.module.storage.mark_qualified(friend_id)
         message = types.SimpleNamespace(
             from_user=types.SimpleNamespace(id=self.user_id),
             text="📘 Методичка №7",
         )
 
-        self.module.process_lesson_request(message, 7)
+        real_is_lesson_issued = self.module.storage.is_lesson_issued
+        with patch.object(
+            self.module.storage,
+            "is_lesson_issued",
+            side_effect=lambda user_id, lesson_number: (
+                True
+                if lesson_number < 7
+                else real_is_lesson_issued(user_id, lesson_number)
+            ),
+        ):
+            self.module.process_lesson_request(message, 7)
 
         self.assertTrue(self.module.storage.is_lesson_issued(self.user_id, 7))
         self.assertEqual(len(self.module.bot.documents), 2)
