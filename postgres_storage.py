@@ -222,6 +222,11 @@ class PostgresStorage:
                 )
                 """
             )
+            connection.execute("SELECT pg_advisory_xact_lock(714083521)")
+            connection.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS exchange TEXT CHECK (exchange IN ('mexc','bitunix'))")
+            connection.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS bitunix_uid TEXT")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_users_bitunix_uid ON bot_users(bitunix_uid)")
+            connection.execute("UPDATE bot_users SET exchange = 'mexc' WHERE mexc_uid IS NOT NULL AND exchange IS NULL")
             # The bot connects as the database owner and bypasses RLS. Keeping
             # these internal tables policy-free prevents Telegram/MEXC data
             # from being exposed through Supabase's anon/authenticated roles.
@@ -276,7 +281,7 @@ class PostgresStorage:
                 SELECT telegram_id, mexc_uid, inviter_telegram_id,
                        activity_confirmed_at,
                        activity_baseline_last_trade_time,
-                       qualified_at
+                       qualified_at, exchange, bitunix_uid
                 FROM bot_users
                 WHERE telegram_id = %s
                 """,
@@ -293,6 +298,8 @@ class PostgresStorage:
                 "activity_baseline_last_trade_time"
             ],
             qualified_at=row["qualified_at"],
+            exchange=row["exchange"] or ("mexc" if row["mexc_uid"] else None),
+            bitunix_uid=row["bitunix_uid"],
         )
 
     def assign_inviter(
@@ -347,52 +354,42 @@ class PostgresStorage:
                 else ReferralAssignment.ALREADY_ASSIGNED
             )
 
-    def bind_mexc_uid(self, telegram_id: int, mexc_uid: str) -> None:
+    def set_exchange(self, telegram_id, exchange):
+        if exchange not in ("mexc", "bitunix"):
+            raise ValueError("Unknown exchange")
         now = self.clock_ms()
         with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO bot_users (telegram_id, created_at, updated_at)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (telegram_id) DO NOTHING
-                """,
-                (telegram_id, now, now),
-            )
-            current = connection.execute(
-                """
-                SELECT mexc_uid FROM bot_users
-                WHERE telegram_id = %s
-                FOR UPDATE
-                """,
-                (telegram_id,),
-            ).fetchone()["mexc_uid"]
-            if current is not None and current != mexc_uid:
-                raise UserMexcUidConflictError(
-                    "Telegram account is already bound to another MEXC UID"
-                )
+            connection.execute("INSERT INTO bot_users (telegram_id, created_at, updated_at) VALUES (%s,%s,%s) ON CONFLICT (telegram_id) DO NOTHING", (telegram_id, now, now))
+            row = connection.execute("SELECT mexc_uid, bitunix_uid, exchange FROM bot_users WHERE telegram_id = %s FOR UPDATE", (telegram_id,)).fetchone()
+            bound_exchange = "mexc" if row["mexc_uid"] is not None else "bitunix" if row["bitunix_uid"] is not None else None
+            if bound_exchange and exchange != bound_exchange:
+                raise UserMexcUidConflictError("Bound exchange cannot be changed")
+            connection.execute("UPDATE bot_users SET exchange = %s, updated_at = %s WHERE telegram_id = %s", (exchange, now, telegram_id))
 
-            owner = connection.execute(
-                "SELECT telegram_id FROM bot_users WHERE mexc_uid = %s",
-                (mexc_uid,),
-            ).fetchone()
-            if owner is not None and owner["telegram_id"] != telegram_id:
-                raise MexcUidAlreadyBoundError(
-                    "MEXC UID is already bound to another Telegram account"
-                )
+    def bind_mexc_uid(self, telegram_id, mexc_uid):
+        self.bind_exchange_uid(telegram_id, mexc_uid, exchange="mexc")
 
+    def bind_exchange_uid(self, telegram_id, uid, *, exchange=None):
+        if not isinstance(uid, str) or not uid.isascii() or not uid.isdigit() or len(uid) > 32:
+            raise ValueError("Invalid UID")
+        now = self.clock_ms()
+        with self._connection() as connection:
+            connection.execute("INSERT INTO bot_users (telegram_id, created_at, updated_at) VALUES (%s,%s,%s) ON CONFLICT (telegram_id) DO NOTHING", (telegram_id, now, now))
+            row = connection.execute("SELECT mexc_uid, bitunix_uid, exchange FROM bot_users WHERE telegram_id = %s FOR UPDATE", (telegram_id,)).fetchone()
+            selected = row["exchange"] or ("mexc" if row["mexc_uid"] else None) or exchange
+            if selected not in ("mexc", "bitunix") or (exchange is not None and selected != exchange):
+                raise UserMexcUidConflictError("Exchange changed before binding")
+            column = "mexc_uid" if selected == "mexc" else "bitunix_uid"
+            other = "bitunix_uid" if selected == "mexc" else "mexc_uid"
+            if row[other] is not None or (row[column] is not None and row[column] != uid):
+                raise UserMexcUidConflictError("A different UID is already bound")
+            owner = connection.execute(f"SELECT telegram_id FROM bot_users WHERE {column} = %s", (uid,)).fetchone()
+            if owner and owner["telegram_id"] != telegram_id:
+                raise MexcUidAlreadyBoundError("UID already belongs to another Telegram account")
             try:
-                connection.execute(
-                    """
-                    UPDATE bot_users
-                    SET mexc_uid = %s, updated_at = %s
-                    WHERE telegram_id = %s
-                    """,
-                    (mexc_uid, now, telegram_id),
-                )
+                connection.execute(f"UPDATE bot_users SET {column} = %s, exchange = %s, updated_at = %s WHERE telegram_id = %s", (uid, selected, now, telegram_id))
             except psycopg.errors.UniqueViolation as exc:
-                raise MexcUidAlreadyBoundError(
-                    "MEXC UID is already bound to another Telegram account"
-                ) from exc
+                raise MexcUidAlreadyBoundError("UID already belongs to another Telegram account") from exc
 
     def record_activity_confirmation(
         self,
@@ -431,7 +428,7 @@ class PostgresStorage:
                 UPDATE bot_users
                 SET qualified_at = COALESCE(qualified_at, %s),
                     updated_at = %s
-                WHERE telegram_id = %s AND mexc_uid IS NOT NULL
+                WHERE telegram_id = %s AND (mexc_uid IS NOT NULL OR bitunix_uid IS NOT NULL)
                 """,
                 (now, now, telegram_id),
             )
@@ -447,7 +444,7 @@ class PostgresStorage:
                 SELECT COUNT(*) AS count
                 FROM bot_users
                 WHERE inviter_telegram_id = %s
-                  AND mexc_uid IS NOT NULL
+                  AND (mexc_uid IS NOT NULL OR bitunix_uid IS NOT NULL)
                   AND qualified_at IS NOT NULL
                 """,
                 (inviter_telegram_id,),
@@ -788,7 +785,7 @@ class PostgresStorage:
         with self._connection() as connection:
             user = connection.execute(
                 """
-                SELECT mexc_uid FROM bot_users
+                SELECT COALESCE(bitunix_uid, mexc_uid) AS mexc_uid FROM bot_users
                 WHERE telegram_id = %s
                 FOR UPDATE
                 """,
