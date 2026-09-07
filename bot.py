@@ -337,6 +337,16 @@ LESSON_FILES = {
 
 
 
+LESSON_VIDEO_URLS = {
+    1: "https://t.me/tradegrowthh/293",
+    2: "https://t.me/tradegrowthh/298",
+    3: "https://t.me/tradegrowthh/315",
+    4: "https://t.me/tradegrowthh/327",
+    5: "https://t.me/tradegrowthh/336",
+    6: "https://t.me/tradegrowthh/348",
+    7: "https://t.me/tradegrowthh/362",
+}
+
 # --- ИНИЦИАЛИЗАЦИЯ MEXC API И КЭША ---
 
 try:
@@ -503,6 +513,9 @@ def send_already_issued_guidance(chat_id, lesson_number):
     """Confirm prior delivery and restore the user's next-step context."""
 
     text = f"ℹ️ Методичка №{lesson_number} уже была вам выдана."
+    video_url = LESSON_VIDEO_URLS.get(lesson_number)
+    if video_url:
+        text += f"\n\n🎬 Видео к уроку: {video_url}"
     next_step = get_after_lesson_text(lesson_number)
     if next_step:
         text += "\n\n" + next_step
@@ -1522,7 +1535,8 @@ def send_lesson(chat_id, lesson_number, delivery_token):
 
         main_file,
 
-        f"📘 Методичка №{lesson_number}",
+        f"📘 Методичка №{lesson_number}\n\n"
+        f"🎬 Видео к уроку: {LESSON_VIDEO_URLS[lesson_number]}",
 
         delivery_token,
 
