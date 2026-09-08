@@ -229,7 +229,7 @@ def send_main_menu(chat_id, text="Выберите методичку или о�
 def get_lesson_requirement_text(lesson_number):
     requirements = {
         1: 'Подпишитесь на <a href="https://t.me/tradegrowthh">канал Growth Trade</a> и проверьте подписку.',
-        2: 'Нужны регистрация на MEXC или Bitunix по ссылке команды и первая сделка. Бот проверит их по вашему UID.',
+        2: 'Нужны регистрация на <a href="https://promote.mexc.com/r/RV1DdMzE">MEXC</a> или <a href="https://www.bitunix.com/register?vipCode=GT777">Bitunix</a> по ссылке команды и первая сделка. Бот проверит их по вашему UID.',
         3: 'Нужен общий торговый объём от 300. Для Bitunix — объём в USD по API, для MEXC — в USDT с проверкой администратора.',
         4: 'Пригласите 1 друга по своей ссылке бота. Друг должен привязать UID MEXC или Bitunix и подтвердить сделку.',
         5: 'Через 30 дней после первого подтверждения активности бот проверит сделку, совершённую после этой контрольной даты.',
