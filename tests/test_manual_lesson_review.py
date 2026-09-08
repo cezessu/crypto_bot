@@ -8,6 +8,7 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 try:
@@ -83,6 +84,7 @@ class FakeTeleBot:
                 "chat_id": chat_id,
                 "text": text,
                 "reply_markup": kwargs.get("reply_markup"),
+                "parse_mode": kwargs.get("parse_mode"),
                 "message": message,
             }
         )
@@ -115,6 +117,10 @@ class FakeTeleBot:
 
     def edit_message_text(self, **kwargs):
         self.edits.append(kwargs)
+        for message in self.messages:
+            if message["chat_id"] == kwargs["chat_id"] and message["message"].message_id == kwargs["message_id"]:
+                message["text"] = kwargs["text"]
+                message["reply_markup"] = kwargs.get("reply_markup")
 
     def answer_callback_query(self, callback_id, text, **kwargs):
         self.callback_answers.append(
@@ -187,13 +193,13 @@ def unavailable_volume_referral(uid):
     )
 
 
-def callback(data, *, from_user_id=ADMIN_ID, chat_id=ADMIN_ID, message_id=1):
+def callback(data, *, from_user_id=ADMIN_ID, chat_id=None, message_id=1):
     return types.SimpleNamespace(
         id=f"callback-{data}",
         data=data,
         from_user=types.SimpleNamespace(id=from_user_id),
         message=types.SimpleNamespace(
-            chat=types.SimpleNamespace(id=chat_id),
+            chat=types.SimpleNamespace(id=from_user_id if chat_id is None else chat_id),
             message_id=message_id,
         ),
     )
@@ -246,6 +252,43 @@ class ManualLessonReviewBotTests(unittest.TestCase):
             if button.callback_data is not None
         }
 
+    def assert_personal_invitation(self, message, user_id):
+        expected = f"https://t.me/growthtradebot?start=ref_{user_id}"
+        self.assertIn(expected, message["text"])
+        buttons = [button for row in message["reply_markup"].rows for button in row]
+        share = next(button for button in buttons if button.text == "👥 Пригласить друга")
+        self.assertEqual(parse_qs(urlparse(share.url).query)["url"], [expected])
+        self.assertEqual(urlparse(share.url).netloc, "t.me")
+        self.assertEqual(urlparse(share.url).path, "/share/url")
+
+    def test_repeated_lessons_show_recipient_specific_invitation_for_next_step(self):
+        self.module._bot_username = "growthtradebot"
+        for user_id in (self.user_id, self.user_id + 1):
+            for previous_lesson in (3, 5, 6):
+                self.module.send_already_issued_guidance(user_id, previous_lesson)
+                message = self.module.bot.messages[-1]
+                self.assert_personal_invitation(message, user_id)
+                self.assertIn(self.module.LESSON_VIDEO_URLS[previous_lesson], message["text"])
+
+    def test_delivered_lessons_include_invitation_with_next_requirement(self):
+        self.module._bot_username = "growthtradebot"
+        with patch.object(self.module, "send_lesson_part", return_value=True):
+            for previous_lesson in (3, 5, 6):
+                self.assertTrue(self.module.send_lesson(self.user_id, previous_lesson, "test-delivery"))
+                self.assert_personal_invitation(self.module.bot.messages[-1], self.user_id)
+
+    def test_friend_conditions_show_invitation_without_menu_detour(self):
+        self.module._bot_username = "growthtradebot"
+        self.module.storage.bind_exchange_uid(self.user_id, self.uid)
+        for lesson in (4, 6, 7):
+            for previous in range(1, lesson):
+                self.module.storage.claim_lesson(self.user_id, previous)
+            self.module.bot.messages.clear()
+            with patch.object(self.module, "check_lesson_with_uid"):
+                self.module.process_lesson_for_user(self.user_id, lesson)
+            self.assert_personal_invitation(self.module.bot.messages[0], self.user_id)
+            self.assertFalse(self.module.storage.is_lesson_issued(self.user_id, lesson))
+
     def test_returning_user_start_resumes_without_captcha(self):
         message = types.SimpleNamespace(
             from_user=types.SimpleNamespace(id=self.user_id),
@@ -295,12 +338,15 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         self.module.process_lesson_for_user(user_id, 2)
         self.assertEqual(len(self.module.bot.messages), 1)
         self.assertIn("exchange:bitunix:2", self.markup_callbacks(self.module.bot.messages[-1]["reply_markup"]))
+        self.assertEqual(self.module.bot.messages[-1]["parse_mode"], "HTML")
+        for url in self.module.EXCHANGE_REFERRAL_URLS.values():
+            self.assertIn(f'href="{url}"', self.module.bot.messages[-1]["text"])
         self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=user_id, chat_id=user_id))
-        self.assertEqual(len(self.module.bot.messages), 2)
+        self.assertEqual(len(self.module.bot.messages), 1)
         self.assertIn("числовой UID", self.module.bot.messages[-1]["text"])
         self.assertIn("Bitunix", self.module.bot.messages[-1]["text"])
         self.assertEqual(self.module.bot.next_steps[user_id], [(self.module.process_uid, (2,))])
-        self.assertEqual(self.module.bot.edits[-1]["text"], "✅ Биржа: Bitunix.")
+        self.assertIn("Методичка №2 · Bitunix", self.module.bot.edits[-1]["text"])
 
     def test_switch_exchange_replaces_pending_uid_handler(self):
         self.module.storage.claim_lesson(self.user_id, 1)
@@ -311,6 +357,35 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=self.user_id))
         self.assertEqual(len(self.module.bot.next_steps[self.user_id]), 1)
         self.assertEqual(self.module.storage.get_user(self.user_id).exchange, "bitunix")
+
+    def test_switching_exchange_keeps_one_message_and_preserves_lesson_progress(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.exchange_clients["bitunix"] = object()
+        self.module.process_lesson_for_user(self.user_id, 2)
+        message_id = self.module.bot.messages[-1]["message"].message_id
+        self.assertIn("MEXC", self.module.bot.messages[-1]["text"])
+        for exchange in ("bitunix", "mexc", "bitunix"):
+            self.module.choose_exchange_callback(callback("choose_exchange:2", from_user_id=self.user_id, chat_id=self.user_id, message_id=message_id))
+            self.assertEqual(self.module.bot.edits[-1]["parse_mode"], "HTML")
+            for url in self.module.EXCHANGE_REFERRAL_URLS.values():
+                self.assertIn(f'href="{url}"', self.module.bot.messages[0]["text"])
+            self.module.exchange_callback(callback(f"exchange:{exchange}:2", from_user_id=self.user_id, chat_id=self.user_id, message_id=message_id))
+            self.assertEqual(len(self.module.bot.messages), 1)
+            self.assertIn(self.module.EXCHANGE_NAMES[exchange], self.module.bot.messages[0]["text"])
+            other_name = "MEXC" if exchange == "bitunix" else "Bitunix"
+            self.assertNotIn(other_name, self.module.bot.messages[0]["text"])
+            self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
+        self.assertTrue(self.module.storage.is_lesson_issued(self.user_id, 1))
+        self.assertIsNone(self.module.storage.get_user(self.user_id).exchange_uid)
+
+    def test_exchange_edit_failure_still_allows_uid_input(self):
+        self.module.storage.claim_lesson(self.user_id, 1)
+        self.module.exchange_clients["bitunix"] = object()
+        with patch.object(self.module.bot, "edit_message_text", side_effect=RuntimeError("message cannot be edited")):
+            self.module.exchange_callback(callback("exchange:bitunix:2", from_user_id=self.user_id, chat_id=self.user_id))
+        self.assertIn("Bitunix", self.module.bot.messages[-1]["text"])
+        self.assertIn("числовой UID", self.module.bot.messages[-1]["text"])
+        self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
 
     def test_bound_mexc_user_goes_directly_to_check(self):
         self.module.storage.claim_lesson(self.user_id, 1)
@@ -347,13 +422,13 @@ class ManualLessonReviewBotTests(unittest.TestCase):
                 self.assertIn("числовой UID", prompt["text"])
                 self.assertEqual(self.markup_callbacks(prompt["reply_markup"]), {"choose_exchange:2"})
                 self.assertTrue(all(button.url is None for row in prompt["reply_markup"].rows for button in row))
-                self.assertNotIn("ссылку", prompt["text"])
-                self.assertNotIn("зарегистр", prompt["text"])
+                self.assertIn(f'href="{self.module.EXCHANGE_REFERRAL_URLS[exchange]}"', prompt["text"])
+                self.assertEqual(prompt["parse_mode"], "HTML")
 
     def test_old_exchange_button_continues_next_unissued_lesson(self):
         self.module.storage.claim_lesson(self.user_id, 1)
         self.module.exchange_callback(callback("exchange:mexc", from_user_id=self.user_id))
-        self.assertIn("числовой UID", self.module.bot.messages[-1]["text"])
+        self.assertIn("числовой UID", self.module.bot.edits[-1]["text"])
         self.assertEqual(self.module.bot.next_steps[self.user_id], [(self.module.process_uid, (2,))])
 
     def test_unrecognized_uid_keeps_input_open(self):
@@ -445,7 +520,8 @@ class ManualLessonReviewBotTests(unittest.TestCase):
         guidance = self.module.bot.messages[-1]
         self.assertIn("уже была вам выдана", guidance["text"])
         self.assertIn("Методичка №2", guidance["text"])
-        self.assertIn("MEXC или Bitunix", guidance["text"])
+        self.assertIn('<a href="https://promote.mexc.com/r/RV1DdMzE">MEXC</a>', guidance["text"])
+        self.assertIn('<a href="https://www.bitunix.com/register?vipCode=GT777">Bitunix</a>', guidance["text"])
         self.assertIsNotNone(guidance["reply_markup"])
 
     def test_all_seven_lessons_deliver_all_eleven_pdfs_once(self):
