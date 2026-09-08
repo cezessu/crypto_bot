@@ -964,8 +964,26 @@ def edit_review_message(call, text, *, reply_markup=None):
         # Telegram still allows the old admin message to be edited.
         log_telegram_error("Manual review admin message edit failed", exc)
 
+def update_exchange_prompt(user_id, text, markup, *, prompt_message=None):
+    """Reuse the clicked bot message; send a new one only if editing is impossible."""
+    if prompt_message is not None:
+        try:
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=prompt_message.message_id,
+                text=text,
+                reply_markup=markup,
+            )
+            return prompt_message
+        except Exception as exc:
+            if "message is not modified" in str(getattr(exc, "description", "")).lower():
+                return prompt_message
+            log_telegram_error("Exchange prompt edit failed", exc)
+    return bot.send_message(user_id, text, reply_markup=markup)
+
+
 # --- ОБРАБОТЧИКИ ---
-def show_exchange_choice(user_id, lesson_number=None):
+def show_exchange_choice(user_id, lesson_number=None, *, prompt_message=None):
     bot.clear_step_handler_by_chat_id(user_id)
     storage.ensure_user(user_id)
     user = storage.get_user(user_id)
@@ -979,7 +997,7 @@ def show_exchange_choice(user_id, lesson_number=None):
     text = "Выберите биржу, на которой зарегистрированы по реферальной ссылке:"
     if lesson_number is not None:
         text = f"📘 Методичка №{lesson_number}\n\n" + text
-    bot.send_message(user_id, text, reply_markup=markup)
+    update_exchange_prompt(user_id, text, markup, prompt_message=prompt_message)
 
 
 @bot.message_handler(commands=['exchange'])
@@ -1005,19 +1023,19 @@ def exchange_callback(call):
     edit_review_message(call, f"✅ Биржа: {EXCHANGE_NAMES[exchange]}.")
     # The lesson travels in the button, so continuation survives a restart.
     if len(parts) == 3:
-        process_lesson_for_user(user_id, int(parts[2]))
+        process_lesson_for_user(user_id, int(parts[2]), prompt_message=call.message)
     elif next_lesson is not None and next_lesson >= 2:
-        process_lesson_for_user(user_id, next_lesson)
+        process_lesson_for_user(user_id, next_lesson, prompt_message=call.message)
     elif next_lesson == 1:
         show_lesson1_subscription_prompt(user_id)
     else:
         send_main_menu(user_id, "Все 7 методичек уже получены. Материалы доступны в переписке.")
 
 
-def request_exchange_uid(user_id, lesson_number, *, retry=False):
+def request_exchange_uid(user_id, lesson_number, *, retry=False, prompt_message=None):
     user = storage.get_user(user_id)
     if not user or not user.exchange:
-        show_exchange_choice(user_id, lesson_number)
+        show_exchange_choice(user_id, lesson_number, prompt_message=prompt_message)
         return
     exchange_name = EXCHANGE_NAMES[user.exchange]
     markup = types.InlineKeyboardMarkup()
@@ -1029,14 +1047,14 @@ def request_exchange_uid(user_id, lesson_number, *, retry=False):
     text += f"Откройте профиль {exchange_name}, скопируйте числовой UID и отправьте его сюда."
     markup.add(types.InlineKeyboardButton("Выбрать другую биржу", callback_data=f"choose_exchange:{lesson_number}"))
     bot.clear_step_handler_by_chat_id(user_id)
-    prompt = bot.send_message(user_id, text, reply_markup=markup)
+    prompt = update_exchange_prompt(user_id, text, markup, prompt_message=prompt_message)
     bot.register_next_step_handler(prompt, process_uid, lesson_number)
 
 
 @bot.callback_query_handler(func=lambda call: bool(re.fullmatch(r'choose_exchange:[2-7]', call.data or '')))
 def choose_exchange_callback(call):
     answer_review_callback(call, "Выберите биржу")
-    show_exchange_choice(call.from_user.id, int(call.data.split(':')[1]))
+    show_exchange_choice(call.from_user.id, int(call.data.split(':')[1]), prompt_message=call.message)
 
 
 @bot.message_handler(commands=['start'])
@@ -1468,7 +1486,7 @@ def process_lesson_request(message, lesson_number):
     process_lesson_for_user(message.from_user.id, lesson_number)
 
 
-def process_lesson_for_user(user_id, lesson_number):
+def process_lesson_for_user(user_id, lesson_number, *, prompt_message=None):
     bot.clear_step_handler_by_chat_id(user_id)
     try:
         storage.ensure_user(user_id)
@@ -1537,7 +1555,7 @@ def process_lesson_for_user(user_id, lesson_number):
         return
 
     if not user_state or not user_state.exchange:
-        show_exchange_choice(user_id, lesson_number)
+        show_exchange_choice(user_id, lesson_number, prompt_message=prompt_message)
         return
     if exchange_clients.get(user_state.exchange) is None:
         bot.send_message(user_id, f"⚠️ Проверка {EXCHANGE_NAMES[user_state.exchange]} временно недоступна. Обратитесь к администратору.")
@@ -1552,7 +1570,7 @@ def process_lesson_for_user(user_id, lesson_number):
         )
         return
 
-    request_exchange_uid(user_id, lesson_number)
+    request_exchange_uid(user_id, lesson_number, prompt_message=prompt_message)
 
 
 def process_uid(message, lesson_number):
