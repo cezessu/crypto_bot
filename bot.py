@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import hashlib
 from pathlib import Path
+from urllib.parse import urlencode
 import telebot
 from telebot import types
 from PIL import Image, ImageDraw, ImageFont
@@ -243,6 +244,24 @@ def get_lesson_requirement_text(lesson_number):
     return f"📘 <b>Методичка №{lesson_number}</b>\n\n" + requirements.get(lesson_number, "")
 
 
+def add_lesson_invitation(text, user_id, lesson_number):
+    """Attach this user's invitation to lessons whose condition includes friends."""
+    if lesson_number not in (4, 6, 7):
+        return text, build_main_menu()
+    try:
+        referral_link = build_referral_link(get_bot_username(), user_id)
+    except Exception as exc:
+        log_telegram_error("Lesson invitation link unavailable", exc)
+        return text + f"\n\nВаша ссылка доступна через «{MENU_REFERRAL_BUTTON}» в меню.", build_main_menu()
+    share_url = "https://t.me/share/url?" + urlencode({
+        "url": referral_link,
+        "text": "Присоединяйся к обучению Growth Trade — методички и видео в боте.",
+    })
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("👥 Пригласить друга", url=share_url))
+    return text + f"\n\nВаша ссылка для приглашения друзей:\n{referral_link}", markup
+
+
 def send_already_issued_guidance(chat_id, lesson_number):
     """Confirm prior delivery and restore the user's next-step context."""
 
@@ -253,10 +272,11 @@ def send_already_issued_guidance(chat_id, lesson_number):
     next_step = get_after_lesson_text(lesson_number)
     if next_step:
         text += "\n\n" + next_step
+    text, markup = add_lesson_invitation(text, chat_id, lesson_number + 1)
     bot.send_message(
         chat_id,
         text,
-        reply_markup=build_main_menu(),
+        reply_markup=markup,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -556,10 +576,11 @@ def send_lesson(chat_id, lesson_number, delivery_token):
     after_text = get_after_lesson_text(lesson_number)
     if after_text:
         try:
+            after_text, markup = add_lesson_invitation(after_text, chat_id, lesson_number + 1)
             bot.send_message(
                 chat_id,
                 after_text,
-                reply_markup=build_main_menu(),
+                reply_markup=markup,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
                 timeout=30,
@@ -1539,10 +1560,18 @@ def process_lesson_for_user(user_id, lesson_number, *, prompt_message=None):
             lesson_number,
             qualified_invites=qualified_invites,
         )
-        bot.send_message(user_id, result.message)
         if result.is_eligible:
+            bot.send_message(user_id, result.message)
             issue_lesson_once(user_id, lesson_number)
+        else:
+            text = get_lesson_requirement_text(lesson_number) + "\n\n" + result.message
+            text, markup = add_lesson_invitation(text, user_id, lesson_number)
+            bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
         return
+
+    if lesson_number == 7:
+        text, markup = add_lesson_invitation(get_lesson_requirement_text(7), user_id, 7)
+        bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
     activity_state = None
     if user_state and user_state.activity_confirmed_at is not None:
