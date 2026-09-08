@@ -174,6 +174,10 @@ for exchange, client in exchange_clients.items():
 mexc = exchange_clients["mexc"]
 
 EXCHANGE_NAMES = {"mexc": "MEXC", "bitunix": "Bitunix"}
+EXCHANGE_REFERRAL_URLS = {
+    "mexc": MEXC_REFERRAL_URL,
+    "bitunix": "https://www.bitunix.com/register?vipCode=GT777",
+}
 MENU_EXCHANGE_BUTTON = "🏦 Биржа"
 
 MEXC_CACHE_TTL_SECONDS = 30
@@ -973,13 +977,15 @@ def update_exchange_prompt(user_id, text, markup, *, prompt_message=None):
                 message_id=prompt_message.message_id,
                 text=text,
                 reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             return prompt_message
         except Exception as exc:
             if "message is not modified" in str(getattr(exc, "description", "")).lower():
                 return prompt_message
             log_telegram_error("Exchange prompt edit failed", exc)
-    return bot.send_message(user_id, text, reply_markup=markup)
+    return bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 
 # --- ОБРАБОТЧИКИ ---
@@ -994,7 +1000,13 @@ def show_exchange_choice(user_id, lesson_number=None, *, prompt_message=None):
     suffix = f":{lesson_number}" if lesson_number is not None else ""
     markup.row(types.InlineKeyboardButton("MEXC", callback_data=f"exchange:mexc{suffix}"),
                types.InlineKeyboardButton("Bitunix", callback_data=f"exchange:bitunix{suffix}"))
-    text = "Выберите биржу, на которой зарегистрированы по реферальной ссылке:"
+    text = (
+        'Ещё не зарегистрированы? Откройте '
+        f'<a href="{EXCHANGE_REFERRAL_URLS["mexc"]}">MEXC</a> или '
+        f'<a href="{EXCHANGE_REFERRAL_URLS["bitunix"]}">Bitunix</a> '
+        'и зарегистрируйтесь по нашей ссылке.\n\n'
+        'Уже зарегистрированы? Выберите свою биржу ниже:'
+    )
     if lesson_number is not None:
         text = f"📘 Методичка №{lesson_number}\n\n" + text
     update_exchange_prompt(user_id, text, markup, prompt_message=prompt_message)
@@ -1044,7 +1056,11 @@ def request_exchange_uid(user_id, lesson_number, *, retry=False, prompt_message=
         text += "UID должен содержать только цифры (до 32 знаков). Попробуйте ещё раз.\n\n"
     elif lesson_number == 2:
         text += "Для получения методички нужна первая сделка.\n\n"
-    text += f"Откройте профиль {exchange_name}, скопируйте числовой UID и отправьте его сюда."
+    text += (
+        'Ещё не зарегистрированы? '
+        f'<a href="{EXCHANGE_REFERRAL_URLS[user.exchange]}">Зарегистрироваться на {exchange_name}</a>.\n\n'
+        f"Если аккаунт уже есть, откройте профиль {exchange_name}, скопируйте числовой UID и отправьте его сюда."
+    )
     markup.add(types.InlineKeyboardButton("Выбрать другую биржу", callback_data=f"choose_exchange:{lesson_number}"))
     bot.clear_step_handler_by_chat_id(user_id)
     prompt = update_exchange_prompt(user_id, text, markup, prompt_message=prompt_message)
