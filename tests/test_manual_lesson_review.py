@@ -552,6 +552,76 @@ class ManualLessonReviewBotTests(unittest.TestCase):
             )
         self.assertEqual(len(self.module.bot.documents), 11)
 
+    def test_redownload_buttons_keep_video_and_invitation(self):
+        self.module._bot_username = "growthtradebot"
+        for lesson in range(1, 8):
+            self.module.send_already_issued_guidance(self.user_id, lesson)
+            message = self.module.bot.messages[-1]
+            self.assertIn(f"lesson_download:{lesson}", self.markup_callbacks(message["reply_markup"]))
+            self.assertIn(self.module.LESSON_VIDEO_URLS[lesson], message["text"])
+            if lesson in (3, 5, 6):
+                self.assert_personal_invitation(message, self.user_id)
+
+    def test_redownload_resends_all_unlocked_files_without_changing_progress(self):
+        for lesson in range(1, 8):
+            self.module.issue_lesson_once(self.user_id, lesson)
+        before = self.module.storage.get_user(self.user_id)
+        self.module.bot.documents.clear()
+        with patch.object(self.module.storage, "claim_lesson_delivery", side_effect=AssertionError("must not issue again")):
+            for lesson in range(1, 8):
+                self.module.handle_lesson_download(callback(f"lesson_download:{lesson}", from_user_id=self.user_id))
+        self.assertEqual(len(self.module.bot.documents), 11)
+        self.assertEqual(self.module.storage.get_user(self.user_id), before)
+        self.assertEqual(self.module.storage.issued_lessons(self.user_id), tuple(range(1, 8)))
+        for lesson in range(1, 8):
+            main = next(doc for doc in self.module.bot.documents if doc["filename"] == self.module.LESSON_FILES[lesson]["main"])
+            self.assertEqual(main["chat_id"], self.user_id)
+            self.assertIn(self.module.LESSON_VIDEO_URLS[lesson], main["caption"])
+
+    def test_redownload_denies_locked_lesson_other_user_and_invalid_callbacks(self):
+        self.module.issue_lesson_once(self.user_id, 1)
+        self.module.bot.documents.clear()
+        cases = [
+            callback("lesson_download:2", from_user_id=self.user_id),
+            callback("lesson_download:1", from_user_id=self.user_id + 1),
+            callback("lesson_download:1", from_user_id=self.user_id, chat_id=-123),
+            callback("lesson_download:1", from_user_id=self.user_id, chat_id=self.user_id + 1),
+            callback("lesson_download:8", from_user_id=self.user_id),
+            callback("lesson_download:1x", from_user_id=self.user_id),
+        ]
+        for call in cases:
+            self.module.handle_lesson_download(call)
+            self.assertTrue(self.module.bot.callback_answers[-1]["show_alert"])
+        self.assertEqual(self.module.bot.documents, [])
+
+    def test_redownload_storage_failure_denies_access(self):
+        with patch.object(self.module.storage, "is_lesson_issued", side_effect=self.module.StorageError("unavailable")):
+            self.module.handle_lesson_download(callback("lesson_download:1", from_user_id=self.user_id))
+        self.assertEqual(self.module.bot.documents, [])
+        self.assertTrue(self.module.bot.callback_answers[-1]["show_alert"])
+
+    def test_redownload_failed_bonus_can_be_retried(self):
+        self.module.issue_lesson_once(self.user_id, 2)
+        self.module.bot.documents.clear()
+        self.module.bot.document_attempts = 0
+        self.module.bot.fail_document_attempts = {2}
+        call = callback("lesson_download:2", from_user_id=self.user_id)
+        self.module.handle_lesson_download(call)
+        self.assertIn("Не удалось отправить все файлы", self.module.bot.messages[-1]["text"])
+        self.assertTrue(self.module.storage.is_lesson_issued(self.user_id, 2))
+        self.module.bot.documents.clear()
+        self.module.handle_lesson_download(call)
+        self.assertEqual(len(self.module.bot.documents), 2)
+
+    def test_redownload_missing_file_keeps_lesson_unlocked(self):
+        self.module.issue_lesson_once(self.user_id, 1)
+        self.module.bot.documents.clear()
+        with patch.object(self.module, "BASE_DIR", Path(self.temp_dir.name)):
+            self.module.handle_lesson_download(callback("lesson_download:1", from_user_id=self.user_id))
+        self.assertTrue(self.module.storage.is_lesson_issued(self.user_id, 1))
+        self.assertEqual(self.module.bot.documents, [])
+        self.assertIn("Скачать ещё раз", self.module.bot.messages[-1]["text"])
+
     def test_lesson_files_are_resolved_from_the_bot_directory(self):
         original_cwd = Path.cwd()
         try:

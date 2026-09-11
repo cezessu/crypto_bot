@@ -244,20 +244,21 @@ def get_lesson_requirement_text(lesson_number):
     return f"📘 <b>Методичка №{lesson_number}</b>\n\n" + requirements.get(lesson_number, "")
 
 
-def add_lesson_invitation(text, user_id, lesson_number):
+def add_lesson_invitation(text, user_id, lesson_number, *, markup=None):
     """Attach this user's invitation to lessons whose condition includes friends."""
     if lesson_number not in (4, 6, 7):
-        return text, build_main_menu()
+        return text, markup if markup is not None else build_main_menu()
     try:
         referral_link = build_referral_link(get_bot_username(), user_id)
     except Exception as exc:
         log_telegram_error("Lesson invitation link unavailable", exc)
-        return text + f"\n\nВаша ссылка доступна через «{MENU_REFERRAL_BUTTON}» в меню.", build_main_menu()
+        return text + f"\n\nВаша ссылка доступна через «{MENU_REFERRAL_BUTTON}» в меню.", markup if markup is not None else build_main_menu()
     share_url = "https://t.me/share/url?" + urlencode({
         "url": referral_link,
         "text": "Присоединяйся к обучению Growth Trade — методички и видео в боте.",
     })
-    markup = types.InlineKeyboardMarkup()
+    if markup is None:
+        markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("👥 Пригласить друга", url=share_url))
     return text + f"\n\nВаша ссылка для приглашения друзей:\n{referral_link}", markup
 
@@ -272,7 +273,11 @@ def send_already_issued_guidance(chat_id, lesson_number):
     next_step = get_after_lesson_text(lesson_number)
     if next_step:
         text += "\n\n" + next_step
-    text, markup = add_lesson_invitation(text, chat_id, lesson_number + 1)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(
+        "📥 Скачать ещё раз", callback_data=f"lesson_download:{lesson_number}"
+    ))
+    text, markup = add_lesson_invitation(text, chat_id, lesson_number + 1, markup=markup)
     bot.send_message(
         chat_id,
         text,
@@ -1226,6 +1231,46 @@ def handle_check_sub(call):
         )
     else:
         bot.answer_callback_query(call.id, "❌ Вы ещё не подписались на канал.", show_alert=True)
+
+
+@bot.callback_query_handler(
+    func=lambda call: (getattr(call, 'data', '') or '').startswith('lesson_download:')
+)
+def handle_lesson_download(call):
+    """Resend an unlocked lesson without modifying its delivery or reward state."""
+    match = re.fullmatch(r"lesson_download:([1-7])", getattr(call, 'data', '') or '')
+    user_id = getattr(getattr(call, 'from_user', None), 'id', None)
+    chat_id = getattr(getattr(getattr(call, 'message', None), 'chat', None), 'id', None)
+    if match is None or user_id is None or chat_id != user_id:
+        answer_review_callback(call, "Откройте методичку в личном чате с ботом.", show_alert=True)
+        return
+
+    lesson_number = int(match.group(1))
+    try:
+        issued = storage.is_lesson_issued(user_id, lesson_number)
+    except (StorageError, sqlite3.Error):
+        answer_review_callback(call, "Не удалось проверить доступ. Попробуйте позже.", show_alert=True)
+        return
+    if not issued:
+        answer_review_callback(call, "Сначала получите эту методичку через меню бота.", show_alert=True)
+        return
+
+    answer_review_callback(call, "Отправляю файлы методички…")
+    try:
+        for part, file_name in LESSON_FILES[lesson_number].items():
+            if not file_name:
+                continue
+            caption = (
+                f"📘 Методичка №{lesson_number}\n\n"
+                f"🎬 Видео к уроку: {LESSON_VIDEO_URLS[lesson_number]}"
+                if part == "main" else
+                f"🎁 Бонус к методичке №{lesson_number}"
+            )
+            with (BASE_DIR / file_name).open('rb') as file_object:
+                bot.send_document(user_id, file_object, caption=caption, timeout=120)
+    except Exception as exc:
+        log_telegram_error("Lesson redownload failed", exc)
+        bot.send_message(user_id, "⚠️ Не удалось отправить все файлы. Нажмите «📥 Скачать ещё раз», чтобы повторить.")
 
 
 @bot.callback_query_handler(
